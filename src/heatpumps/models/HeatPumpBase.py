@@ -20,6 +20,7 @@ from tespy.components import Compressor, Pump, Valve, HeatExchanger, CycleCloser
 from tespy.connections import Connection, PowerConnection, Ref
 from ..economics.econ_params import EconParams, econ_defaults
 from ..economics.economic_utils import run_full_economic_pipeline
+from ..economics.exerpy_costing import determine_exergy_boundaries
 
 
 class HeatPumpBase:
@@ -383,16 +384,11 @@ class HeatPumpBase:
         # ---------------------------
         # Ab hier: STABIL & EINFACH
         # ---------------------------
-        fuel = {"inputs": ['E0'], "outputs": []}
-        product = {"inputs": ['C3'], "outputs": ['C1']}
-        env_out = 'B3' if 'B3' in self.conns else 'B2'
-        loss = {"inputs": [env_out], "outputs": ['B1']}
-
-        # Intercooler cooling loop (HeatPumpIC/HeatPumpICTrans): add to loss boundary
-        if self.__class__.__name__ in ("HeatPumpIC", "HeatPumpICTrans"):
-            # Pin outlet (D2) as loss input; leave D1 unpinned.
-            if "D2" in self.conns:
-                loss["inputs"].append("D2")
+        boundaries = determine_exergy_boundaries(self)
+        fuel = boundaries["fuel"]
+        product = boundaries["product"]
+        loss = boundaries["loss"]
+        self.exergy_boundary_scenario = boundaries.get("scenario")
 
         self.ean.analyse(E_F=fuel, E_P=product, E_L=loss)
 

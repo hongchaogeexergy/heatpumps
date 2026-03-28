@@ -22,6 +22,92 @@ def _scalar(x):
         x = x[-1]  # take last element for time-series-like inputs
     return x
 
+
+def _conn_temperature_C(hp, label, fallback=None):
+    """Return connection temperature in degC from solved state or fallback params."""
+    conn = getattr(hp, "conns", {}).get(label)
+    if conn is not None:
+        try:
+            val = float(conn.T.val)
+            if not np.isnan(val):
+                return val
+        except Exception:
+            pass
+
+    if label in ("B1", "B2", "B3"):
+        try:
+            if label == "B3":
+                return hp.params.get("B2", {}).get("T", fallback)
+            return hp.params.get(label, {}).get("T", fallback)
+        except Exception:
+            pass
+    if label in ("C1", "C2", "C3"):
+        try:
+            return hp.params.get(label, {}).get("T", fallback)
+        except Exception:
+            pass
+    return fallback
+
+
+def determine_exergy_boundaries(hp, source_tol_K=1.0):
+    """
+    Determine fuel, product and loss boundaries from source-side temperature level.
+
+    Scenarios
+    ---------
+    1. Environmental source:
+       B1 close to ambient -> source side is treated as loss (B3 -> B1).
+    2. Waste heat fully cooled to ambient:
+       B1 above ambient and B3 close to ambient -> source stream is fuel with
+       residual stream returned at ambient (E0 + B1 -> B3).
+    3. Waste heat partly cooled, outlet still above ambient:
+       B1 above ambient and B3 above ambient -> source inlet is fuel and source
+       outlet is loss (E0 + B1, loss via B3).
+    """
+    conns = getattr(hp, "conns", {}) or {}
+    ambient_T = float(hp.params["ambient"]["T"])
+    env_out = "B3" if "B3" in conns else ("B2" if "B2" in conns else None)
+
+    fuel = {"inputs": ["E0"] if "E0" in conns else [], "outputs": []}
+    product = {
+        "inputs": [x for x in ("C3",) if x in conns],
+        "outputs": [x for x in ("C1",) if x in conns],
+    }
+    loss = {"inputs": [], "outputs": []}
+
+    if "B1" not in conns or env_out is None:
+        return {"fuel": fuel, "product": product, "loss": loss, "scenario": "fallback"}
+
+    T_b1 = _conn_temperature_C(hp, "B1", fallback=ambient_T)
+    T_bout = _conn_temperature_C(hp, env_out, fallback=ambient_T)
+
+    if T_b1 is None or T_bout is None:
+        loss = {"inputs": [env_out], "outputs": ["B1"]}
+        return {"fuel": fuel, "product": product, "loss": loss, "scenario": "fallback"}
+
+    if T_b1 <= ambient_T + source_tol_K:
+        loss = {"inputs": [env_out], "outputs": ["B1"]}
+        scenario = "environmental_source"
+    elif T_bout <= ambient_T + source_tol_K:
+        fuel["inputs"].append("B1")
+        fuel["outputs"].append(env_out)
+        scenario = "waste_heat_to_ambient"
+    else:
+        fuel["inputs"].append("B1")
+        loss = {"inputs": [env_out], "outputs": []}
+        scenario = "waste_heat_above_ambient"
+
+    # Intercooler cooling loop (HeatPumpIC / cascade IC): treat discharged cooling
+    # water as loss boundary independent of source-side classification.
+    if getattr(hp, "__class__", None) and hp.__class__.__name__ in (
+        "HeatPumpIC", "HeatPumpICTrans", "HeatPumpCascadeIC", "HeatPumpCascadeICTrans"
+    ):
+        for lbl in ("D2",):
+            if lbl in conns and lbl not in loss["inputs"]:
+                loss["inputs"].append(lbl)
+
+    return {"fuel": fuel, "product": product, "loss": loss, "scenario": scenario}
+
 def _scalarize_portdict(portdict):
     """
     ExerPy ports are dict-like: {"T":..., "p":..., "E_M":..., ...}
@@ -787,17 +873,14 @@ def build_exergo_boundaries(ean, hp):
         else:
             internal_zero.append(lbl)    # internal distribution → zero price
 
-    product = {"inputs": [x for x in ("C3",) if x in conns],
-               "outputs": [x for x in ("C1",) if x in conns]}
-    loss    = {"inputs": [x for x in ("B3",) if x in conns],
-               "outputs":[x for x in ("B1",) if x in conns]}
+    boundaries = determine_exergy_boundaries(hp)
+    fuel = boundaries["fuel"]
+    product = boundaries["product"]
+    loss = boundaries["loss"]
 
-    # Intercooler cooling loop (HeatPumpIC/HeatPumpICTrans): treat as loss boundary
-    if getattr(hp, "__class__", None) and hp.__class__.__name__ in ("HeatPumpIC", "HeatPumpICTrans"):
-        # Pin outlet (D2) as loss input; leave D1 unpinned.
-        for lbl in ("D2",):
-            if lbl in conns and lbl not in loss["inputs"]:
-                loss["inputs"].append(lbl)
+    for lbl in fuel.get("inputs", []):
+        if lbl not in fuel_inputs:
+            fuel_inputs.append(lbl)
 
     return fuel_inputs, internal_zero, product, loss
 
@@ -1353,12 +1436,12 @@ def run_exergoeconomic_from_hp(
     )
 
     fuel_inputs, internal_zero, product_b, loss_b = build_exergo_boundaries(ean, hp)
-
-    boundaries_detected = {
-        "fuel": {"inputs": fuel_inputs, "outputs": []},
-        "product": product_b,
-        "loss": loss_b,
-    }
+    boundaries_detected = determine_exergy_boundaries(hp)
+    boundaries_detected["product"] = product_b
+    boundaries_detected["loss"] = loss_b
+    for lbl in fuel_inputs:
+        if lbl not in boundaries_detected["fuel"]["inputs"]:
+            boundaries_detected["fuel"]["inputs"].append(lbl)
     if debug:
         print("\n[BOUNDARY-DBG] UI boundaries:")
         print(" fuel   :", fuel)
