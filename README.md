@@ -2,15 +2,59 @@
 
 # heatpumps
 
-Steady-state simulation of design and partload operation of a wide collection of heat pump topologies.
+Steady-state simulation, exergy analysis, and exergoeconomic evaluation of a wide collection of heat pump topologies.
+
+## Overview
+
+The heat pump simulator `heatpumps` is a simulation environment for the analysis
+and evaluation of heat pumps. The package combines thermodynamic design
+simulation, stationary part-load analysis, exergy analysis, and
+exergoeconomic assessment in a Streamlit-based dashboard.
+
+The dashboard makes it possible to work with complex thermodynamic plant models
+through a compact user interface. In addition to the design calculation and the
+stationary part-load simulation, the tool provides transparent access to state
+variables, COP, component effort, exergy-based inefficiencies, and economic
+indicators.
 
 ## Key Features
 
-  - Steady-state simulation of design and partload operation based on [TESPy](https://github.com/oemof/tespy)
-  - Parametrization and result visualisation through a [Streamlit](https://github.com/streamlit/streamlit) dashboard
-  - Industry standard, as well as topologies still in research and developement, supported
-  - Sub- and transcritical processes
-  - Wide variety of refrigerants due to the integration of [CoolProp](https://github.com/CoolProp/CoolProp)
+- Steady-state design and part-load simulation based on [TESPy](https://github.com/oemof/tespy)
+- Parametrization and result visualisation through a [Streamlit](https://github.com/streamlit/streamlit) dashboard
+- Industry, research, and development heat pump topologies in one package
+- Subcritical and transcritical processes
+- Broad refrigerant support via [CoolProp](https://github.com/CoolProp/CoolProp)
+- Integration of `PowerBus` and `PowerConnection` from recent TESPy versions
+- Explicit modelling of the heat sink as a water string instead of a simplified consumer boundary
+- Exergy and exergoeconomic evaluation with [ExerPy](https://exerpy.readthedocs.io/en/latest/)
+
+## Dashboard Focus
+
+The dashboard supports:
+
+- Numerical design and stationary part-load analysis for a wide range of heat pump topologies
+- Comparison of boundary conditions, refrigerants, and topology variants
+- Detailed exergy analysis for the overall plant and for individual components
+- Exergoeconomic evaluation including component-related cost rates and cost balances
+
+In this implementation, the original topology handling has been extended to
+include explicit electrical power flows through `PowerBus` and
+`PowerConnection`, an explicit heat sink string, and integrated ExerPy-based
+exergy and exergoeconomic workflows.
+
+## Exergy and Exergoeconomics
+
+This project uses [ExerPy](https://exerpy.readthedocs.io/en/latest/) for the
+exergy and exergoeconomic analysis. ExerPy is a Python library for automated
+exergy analysis of energy conversion systems and extends the TESPy-based
+modelling workflow with consistent exergy balances and cost-based evaluation.
+
+Within the dashboard, this allows the simulation results to be complemented by:
+
+- component-wise exergy destruction
+- exergy efficiencies
+- exergoeconomic cost rates
+- combined assessment of inefficiencies and costs
 
 ## Installation
 
@@ -47,6 +91,27 @@ The heatpumps package comes with a command to run the dashboard directly from yo
 ```
 heatpumps-dashboard
 ```
+
+Alternatively, the dashboard can be started directly with Streamlit:
+
+```
+streamlit run src/heatpumps/hp_dashboard.py
+```
+
+## Software Used
+
+The following software and libraries are used in the package and the dashboard:
+
+- [TESPy](https://tespy.readthedocs.io)
+- [ExerPy](https://exerpy.readthedocs.io/en/latest/)
+- [CoolProp](http://www.coolprop.org)
+- [Streamlit](https://docs.streamlit.io)
+- [NumPy](https://numpy.org)
+- [pandas](https://pandas.pydata.org)
+- [SciPy](https://scipy.org/)
+- [scikit-learn](https://scikit-learn.org)
+- [Matplotlib](https://matplotlib.org)
+- [FluProDia](https://fluprodia.readthedocs.io)
 
 ## Using the heat pump model classes
 
