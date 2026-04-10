@@ -896,7 +896,7 @@ def build_costs(
     flash_pressure_ref_bar=10.0,
     flash_pressure_exponent=0.0,
     flash_rho_default=1000.0,
-    CEPCI_cur=797.9, CEPCI_ref=567.3,
+    CEPCI_cur=797.9, CEPCI_ref=556.8,
     tci_factor=6.32, omc_rel=0.03, i_eff=0.08, r_n=0.02, n=20,
     tau_h_per_year=5500.0
 ):
@@ -937,14 +937,18 @@ def build_costs(
         if "pump" not in lbl.lower():
             continue
         try:
-            m = float(comp.inl[0].m.val_SI)
-            rho = float(comp.inl[0].rho.val_SI)
-            VM_m3_h = (m / max(rho, 1e-9)) * 3600.0
+            Wp_kW = abs(float(comp.P.val)) / 1e3
         except Exception:
-            VM_m3_h = 279.8  # safe default
+            Wp_kW = 1.0  # safe default to keep log() defined
         PEC[lbl] = max(
             PEC.get(lbl, 0.0),
-            19850.0 * (VM_m3_h / 279.8) ** 0.73 * cepci
+            max(
+                math.log10(max(Wp_kW, 1e-9))
+                - 0.03195 * Wp_kW ** 2
+                + 467.2 * Wp_kW
+                + 20480.0,
+                0.0
+            ) * cepci
         )
 
     # --- heat exchangers (area-based) ----------------------------------------

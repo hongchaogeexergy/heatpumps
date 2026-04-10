@@ -587,6 +587,11 @@ with st.sidebar:
             with open(cepcipath, 'r', encoding='utf-8') as file:
                 cepci = json.load(file)
 
+            st.caption(
+                'Das CEPCI-Referenzjahr ist fest auf 2015 gesetzt. '
+                'Im Dashboard wird nur das aktuelle Kostenjahr ausgewählt.'
+            )
+
             costcalcparams['current_year'] = st.selectbox(
                 'Jahr der Kostenkalkulation',
                 options=sorted(list(cepci.keys()), reverse=True),
@@ -1508,7 +1513,7 @@ if mode == 'Auslegung':
                     with open(cepcipath, 'r', encoding='utf-8') as f:
                         _cepci = json.load(f)
 
-                    ref_year  = "2013" if "2013" in _cepci else min(_cepci.keys())
+                    ref_year = "2015" if "2015" in _cepci else min(_cepci.keys())
                     CEPCI_cur = float(_cepci[str(costcalcparams['current_year'])])
                     CEPCI_ref = float(_cepci[str(ref_year)])
                     cepci_factor = CEPCI_cur / CEPCI_ref
@@ -1560,6 +1565,7 @@ if mode == 'Auslegung':
                         wird die Preisbasis mit dem CEPCI-Faktor korrigiert.
 
                         Aktuell gilt:
+                        - `CEPCI-Referenzjahr = {ref_year}`
                         - `CEPCI-Faktor = CEPCI_aktuell / CEPCI_ref = {CEPCI_cur:.1f} / {CEPCI_ref:.1f} = {cepci_factor:.3f}`
                         - Strompreis für die Exergoökonomie: `c_el = (ct/kWh / 100) * 277.78`
                         """
@@ -1568,8 +1574,8 @@ if mode == 'Auslegung':
                     st.latex(r"PEC_{\mathrm{comp}} = 19{,}850 \left(\frac{\dot{V}_{in}}{279.8}\right)^{0.73} \cdot \frac{\mathrm{CEPCI}_{cur}}{\mathrm{CEPCI}_{ref}}")
                     st.caption("Verdichterkosten aus dem Eintritts-Volumenstrom \\(\\dot{V}_{in}\\) in m³/h.")
 
-                    st.latex(r"PEC_{\mathrm{pump}} = 19{,}850 \left(\frac{\dot{V}_{in}}{279.8}\right)^{0.73} \cdot \frac{\mathrm{CEPCI}_{cur}}{\mathrm{CEPCI}_{ref}}")
-                    st.caption("Pumpenkosten aus dem Eintritts-Volumenstrom \\(\\dot{V}_{in}\\) in m³/h.")
+                    st.latex(r"PEC_{\mathrm{pump}} = \left(\log_{10}(\dot{W}_{P}) - 0.03195 \cdot \dot{W}_{P}^{2} + 467.2 \cdot \dot{W}_{P} + 20480\right) \cdot \frac{\mathrm{CEPCI}_{cur}}{\mathrm{CEPCI}_{ref}}")
+                    st.caption("Pumpenkosten aus der Pumpenleistung \\(\\dot{W}_{P}\\) in kW.")
 
                     st.latex(r"\mathrm{LMTD} = \frac{\Delta T_1 - \Delta T_2}{\ln(\Delta T_1 / \Delta T_2)}, \qquad A = \frac{\dot{Q}}{k \cdot \mathrm{LMTD}}")
                     st.latex(r"PEC_{\mathrm{HEX}} = 15{,}526 \left(\frac{A}{42}\right)^{0.8} \cdot \frac{\mathrm{CEPCI}_{cur}}{\mathrm{CEPCI}_{ref}}")
@@ -1587,6 +1593,7 @@ if mode == 'Auslegung':
                         bezogen.
                         """
                     )
+                    st.caption("For more detailed information, please refer to the documentation.")
                     st.latex(r"a = \frac{i_{eff} - r_n}{1 - \left(\frac{1+r_n}{1+i_{eff}}\right)^n}")
                     st.latex(r"CCL = a \cdot \sum TCI_k, \qquad OMCL = f_{\mathrm{O\&M}} \cdot \sum TCI_k")
                     st.latex(r"Z_k = \frac{(CCL + OMCL)\left(\frac{PEC_k}{\sum PEC_k}\right)}{\tau_h}")

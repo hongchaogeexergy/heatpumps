@@ -5,9 +5,9 @@ from typing import Dict, Any
 @dataclass
 class EconParams:
     # Cost indices / correction
-    ref_year: str = "2013"
+    ref_year: str = "2015"
     current_year: str = "2023"
-    cepci_ref: float = 567.3   # CEPCI 2013
+    cepci_ref: float = 556.8   # CEPCI 2015
     cepci_cur: float = 797.9   # CEPCI 2023
 
     # Electricity price & operating hours
