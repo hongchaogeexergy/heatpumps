@@ -1,4 +1,11 @@
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://heatpumps.streamlit.app/)
+This Version is a extension based on the original heatpumps app(by Jonas Freißmann and Malte Fritz)
+
+In this version, main new features are: 
+
+- Integration of `PowerBus` and `PowerConnection` from recent TESPy versions
+- Explicit modelling of the heat sink as a water string instead of a simplified consumer boundary
+- Exergy and exergoeconomic evaluation with [ExerPy](https://exerpy.readthedocs.io/en/latest/)
+
 
 # heatpumps
 
