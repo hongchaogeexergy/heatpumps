@@ -55,18 +55,20 @@ def determine_exergy_boundaries(hp, source_tol_K=1.0):
 
     Scenarios
     ---------
-    1. Environmental source:
+    A. Environmental source:
        B1 close to ambient -> source side is treated as loss (B3 -> B1).
-    2. Waste heat fully cooled to ambient:
-       B1 above ambient and B3 close to ambient -> source stream is fuel with
-       residual stream returned at ambient (E0 + B1 -> B3).
-    3. Waste heat partly cooled, outlet still above ambient:
-       B1 above ambient and B3 above ambient -> source inlet is fuel and source
-       outlet is loss (E0 + B1, loss via B3).
+    B. Waste heat:
+       B1 above ambient -> source inlet is fuel and source outlet is loss.
+    C. Waste heat further usage:
+       User explicitly enables further usage of return stream and B3 stays at or
+       above ambient -> source inlet is fuel and no source-side loss is assigned.
     """
     conns = getattr(hp, "conns", {}) or {}
     ambient_T = float(hp.params["ambient"]["T"])
     env_out = "B3" if "B3" in conns else ("B2" if "B2" in conns else None)
+    consider_further_usage = bool(
+        hp.params.get("setup", {}).get("waste_heat_further_usage", False)
+    )
 
     fuel = {"inputs": ["E0"] if "E0" in conns else [], "outputs": []}
     product = {
@@ -80,22 +82,29 @@ def determine_exergy_boundaries(hp, source_tol_K=1.0):
 
     T_b1 = _conn_temperature_C(hp, "B1", fallback=ambient_T)
     T_bout = _conn_temperature_C(hp, env_out, fallback=ambient_T)
+    return_below_ambient = False
 
     if T_b1 is None or T_bout is None:
         loss = {"inputs": [env_out], "outputs": ["B1"]}
-        return {"fuel": fuel, "product": product, "loss": loss, "scenario": "fallback"}
+        return {
+            "fuel": fuel,
+            "product": product,
+            "loss": loss,
+            "scenario": "fallback",
+            "return_below_ambient": False,
+        }
 
     if T_b1 <= ambient_T + source_tol_K:
         loss = {"inputs": [env_out], "outputs": ["B1"]}
-        scenario = "environmental_source"
-    elif T_bout <= ambient_T + source_tol_K:
+        scenario = "case_a_environmental_source"
+    elif consider_further_usage and T_bout >= ambient_T - source_tol_K:
         fuel["inputs"].append("B1")
-        fuel["outputs"].append(env_out)
-        scenario = "waste_heat_to_ambient"
+        scenario = "case_c_waste_heat_further_usage"
     else:
         fuel["inputs"].append("B1")
         loss = {"inputs": [env_out], "outputs": []}
-        scenario = "waste_heat_above_ambient"
+        scenario = "case_b_waste_heat"
+        return_below_ambient = T_bout < ambient_T - source_tol_K
 
     # Intercooler cooling loop (HeatPumpIC / cascade IC): treat discharged cooling
     # water as loss boundary independent of source-side classification.
@@ -106,7 +115,14 @@ def determine_exergy_boundaries(hp, source_tol_K=1.0):
             if lbl in conns and lbl not in loss["inputs"]:
                 loss["inputs"].append(lbl)
 
-    return {"fuel": fuel, "product": product, "loss": loss, "scenario": scenario}
+    return {
+        "fuel": fuel,
+        "product": product,
+        "loss": loss,
+        "scenario": scenario,
+        "return_below_ambient": return_below_ambient,
+        "consider_further_usage": consider_further_usage,
+    }
 
 def _scalarize_portdict(portdict):
     """

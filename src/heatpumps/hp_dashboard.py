@@ -460,6 +460,7 @@ with st.sidebar:
             params['cons']['Q'] *= -1e6
 
         with st.expander('Wärmequelle'):
+            params.setdefault('setup', {})
             params['B1']['T'] = st.slider(
                 'Temperatur Vorlauf', min_value=0, max_value=T_crit,
                 value=params['B1']['T'], format='%d°C', key='T_heatsource_ff'
@@ -475,6 +476,13 @@ with st.sidebar:
                     'Die Rücklauftemperatur muss niedriger sein, als die '
                     + 'Vorlauftemperatur.'
                     )
+            params['setup']['waste_heat_further_usage'] = st.checkbox(
+                'Waste heat further usage berücksichtigen',
+                value=bool(params['setup'].get('waste_heat_further_usage', False)),
+                help='Falls aktiviert, wird der Rücklauf der Wärmequelle in der '
+                     'Exergieanalyse als weiter nutzbar betrachtet, sofern er '
+                     'nicht unter die Umgebungstemperatur fällt.'
+            )
 
         # TODO: Aktuell wird T_mid im Modell als Mittelwert zwischen von Ver-
         #       dampfungs- und Kondensationstemperatur gebildet. An sich wäre
@@ -1805,6 +1813,42 @@ if mode == 'Auslegung':
                         tot_mask = df_comp["Component"].astype(str).eq("TOT")
                         df_comp = pd.concat([df_comp.loc[~tot_mask], df_comp.loc[tot_mask]], ignore_index=True)
                     st.dataframe(df_comp, use_container_width=True, hide_index=True)
+
+                    boundary_info = getattr(ss.hp, "exergy_boundary_info", {}) or {}
+                    active_case = boundary_info.get("scenario", "fallback")
+                    if boundary_info.get("return_below_ambient", False):
+                        st.warning("Return is below ambient.")
+
+                    case_labels = {
+                        "case_a_environmental_source": "Case A",
+                        "case_b_waste_heat": "Case B",
+                        "case_c_waste_heat_further_usage": "Case C",
+                        "fallback": "Fallback",
+                    }
+                    st.caption(f"Aktueller Systemgrenzenfall: {case_labels.get(active_case, active_case)}")
+
+                    st.markdown("**Definition von Fuel, Product und Loss**")
+                    st.code(
+                        'Case A — environmental source, cooled below ambient\n\n'
+                        'fuel = {"inputs": ["E0"], "outputs": []}\n'
+                        'product = {"inputs": ["C3"], "outputs": ["C1"]}\n'
+                        'loss = {"inputs": ["B3"], "outputs": ["B1"]}',
+                        language="python"
+                    )
+                    st.code(
+                        'Case B — waste heat, return still above or is the same as ambient.\n\n'
+                        'fuel = {"inputs": ["E0", "B1"], "outputs": []}\n'
+                        'product = {"inputs": ["C3"], "outputs": ["C1"]}\n'
+                        'loss = {"inputs": ["B3"], "outputs": []}',
+                        language="python"
+                    )
+                    st.code(
+                        'Case C — Spezieller Fall, waste heat, return still above ambient\n\n'
+                        'fuel = {"inputs": ["E0","B1"], "outputs": []}\n'
+                        'product = {"inputs": ["C3"], "outputs": ["C1"]}\n'
+                        'loss = {"inputs": [""], "outputs": [""]}',
+                        language="python"
+                    )
 
                     # ===== 2b) Material-Verbindungen =====
                     st.subheader("Materialströme (Verbindungen)")

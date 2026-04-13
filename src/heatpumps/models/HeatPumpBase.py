@@ -389,6 +389,7 @@ class HeatPumpBase:
         product = boundaries["product"]
         loss = boundaries["loss"]
         self.exergy_boundary_scenario = boundaries.get("scenario")
+        self.exergy_boundary_info = boundaries
 
         self.ean.analyse(E_F=fuel, E_P=product, E_L=loss)
 
