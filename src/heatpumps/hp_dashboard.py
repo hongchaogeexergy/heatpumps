@@ -469,6 +469,11 @@ with st.sidebar:
                 'Temperatur Rücklauf', min_value=0, max_value=T_crit,
                 value=params['B2']['T'], format='%d°C', key='T_heatsource_bf'
                 )
+            params['B1']['p'] = st.number_input(
+                'Druck Wärmequelle [bar]', min_value=0.1, max_value=200.0,
+                value=float(params['B1'].get('p', 1.013)),
+                step=0.1, format='%.3f', key='p_heatsource'
+            )
 
             invalid_temp_diff = params['B2']['T'] >= params['B1']['T']
             if invalid_temp_diff:
@@ -510,6 +515,14 @@ with st.sidebar:
                 'Temperatur Rücklauf', min_value=0, max_value=T_max_sink,
                 value=params['C1']['T'], format='%d°C', key='T_consumer_bf'
             )
+            sink_pressure = st.number_input(
+                'Druck Wärmesenke [bar]', min_value=0.1, max_value=200.0,
+                value=float(params.get('C3', {}).get('p', params['C1'].get('p', 10.0))),
+                step=0.1, format='%.3f', key='p_consumer'
+            )
+            params.setdefault('C3', {})
+            params['C3']['p'] = sink_pressure
+            params['C1']['p'] = sink_pressure
 
             invalid_temp_diff = params['C1']['T'] >= params['C3']['T']
             if invalid_temp_diff:
@@ -606,6 +619,20 @@ with st.sidebar:
                 key='current_year'
             )
 
+            costcalcparams['elec_price_cent_kWh'] = st.number_input(
+                'Strompreis [ct/kWh]',
+                min_value=0.0, max_value=200.0, step=1.0,
+                value=float(ss.get('elec_price_cent_kWh', 40.0)),
+                key='elec_price_cent_kWh'
+            )
+
+            costcalcparams['tau_h_per_year'] = st.number_input(
+                'Volllaststunden [h/a]',
+                min_value=0.0, max_value=9000.0, step=100.0,
+                value=float(ss.get('tau_h_per_year', 5500.0)),
+                key='tau_h_per_year'
+            )
+
             costcalcparams['k_evap'] = st.slider(
                 'Wärmedurchgangskoeffizient (Verdampfung)',
                 min_value=0, max_value=5000, step=10,
@@ -637,6 +664,7 @@ with st.sidebar:
                 value=10, format='%d s', key='residence_time'
                 )
 
+        ss.costcalcparams = dict(costcalcparams)
         ss.hp_params = params
 
         run_sim = st.button('🧮 Auslegung ausführen')
@@ -1500,17 +1528,9 @@ if mode == 'Auslegung':
                 exergoecon_container = st.container()
 
                 with exergoecon_container.expander('Ökonomische / Exergoökonomische Bewertung', expanded=True):
-
-                    # ===============================
-                    # User inputs (ONLY economics)
-                    # ===============================
-                    colp, colt = st.columns(2)
-                    elec_price_cent_kWh = colp.number_input(
-                        "Strompreis [ct/kWh]", 0.0, 200.0, 40.0, step=1.0
-                    )
-                    tau_h_per_year = colt.number_input(
-                        "Volllaststunden [h/a]", 0.0, 9000.0, 5500.0, step=100.0
-                    )
+                    costcalcparams = dict(ss.get('costcalcparams', costcalcparams))
+                    elec_price_cent_kWh = float(costcalcparams.get('elec_price_cent_kWh', 40.0))
+                    tau_h_per_year = float(costcalcparams.get('tau_h_per_year', 5500.0))
 
                     # ===============================
                     # CEPCI
