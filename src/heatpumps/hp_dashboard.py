@@ -18,6 +18,142 @@ from heatpumps.economics.exerpy_costing import build_costs, run_exergoeconomic_f
 from heatpumps.models.topology_diagram import build_graph_from_hp
 
 
+PEC_HEX_OPTIONS = {
+    "ommen": {
+        "label": "Ommen et al. (Default)",
+        "formula": r"PEC_{\mathrm{HEX}} = 15526 \left(\frac{A}{42}\right)^{0.80}",
+        "reference": "Ommen et al.",
+        "literature_year": "2015",
+        "data_year": "2013",
+        "cepci_ref": 567.0,
+    },
+    "dai_cascade": {
+        "label": "Dai et al. (Kaskaden-WT)",
+        "formula": r"PEC_{\mathrm{HEX}} = 383.5 \cdot A^{0.65}",
+        "reference": "Dai et al.",
+        "literature_year": "2022",
+        "data_year": "2015-2016",
+        "cepci_ref": 555.0,
+    },
+    "shamoushaki_shell": {
+        "label": "Shamoushaki (Rohrbündel)",
+        "formula": r"PEC_{\mathrm{HEX}} = \log_{10}(A) - 0.06395 \cdot A^2 + 947.2 \cdot A + 227.9",
+        "reference": "Shamoushaki et al.",
+        "literature_year": "2021",
+        "data_year": "2020",
+        "cepci_ref": 596.0,
+    },
+    "shamoushaki_plate": {
+        "label": "Shamoushaki (Platte)",
+        "formula": r"PEC_{\mathrm{HEX}} = \log_{10}(A) + 0.2581 \cdot A^2 + 891.7 \cdot A + 26050",
+        "reference": "Shamoushaki et al.",
+        "literature_year": "2021",
+        "data_year": "2020",
+        "cepci_ref": 596.0,
+    },
+}
+
+PEC_COMP_OPTIONS = {
+    "ommen": {
+        "label": "Ommen et al. (Default)",
+        "formula": r"PEC_{\mathrm{comp}} = 19850 \left(\frac{\dot{V}_{in}}{279.8}\right)^{0.73}",
+        "reference": "Ommen et al.",
+        "literature_year": "2015",
+        "data_year": "2013",
+        "cepci_ref": 567.0,
+    },
+    "shamoushaki_centrifugal": {
+        "label": "Shamoushaki (Zentrifugalverdichter)",
+        "formula": r"PEC_{\mathrm{comp}} = \log_{10}(\dot{W}_{P}) + 0.03867 \cdot \dot{W}_{P}^{2} + 4446.7 \cdot \dot{W}_{P} + 137800",
+        "reference": "Shamoushaki et al.",
+        "literature_year": "2021",
+        "data_year": "2020",
+        "cepci_ref": 596.0,
+    },
+    "shamoushaki_reciprocating": {
+        "label": "Shamoushaki (Hubkolbenverdichter)",
+        "formula": r"PEC_{\mathrm{comp}} = \log_{10}(\dot{W}_{P}) + 0.04147 \cdot \dot{W}_{P}^{2} + 454.8 \cdot \dot{W}_{P} + 181000",
+        "reference": "Shamoushaki et al.",
+        "literature_year": "2021",
+        "data_year": "2020",
+        "cepci_ref": 596.0,
+    },
+}
+
+PEC_PUMP_OPTION = {
+    "label": "Shamoushaki et al.",
+    "formula": r"PEC_{\mathrm{pump}} = \log_{10}(\dot{W}_{P}) - 0.03195 \cdot \dot{W}_{P}^{2} + 467.2 \cdot \dot{W}_{P} + 20480",
+    "reference": "Shamoushaki et al.",
+    "literature_year": "2021",
+    "data_year": "2020",
+    "cepci_ref": 596.0,
+}
+
+PEC_FLASH_OPTIONS = {
+    "ommen": {
+        "label": "Ommen et al. (Default)",
+        "formula": r"PEC_{\mathrm{flash}} = 1444 \left(\frac{V_{\mathrm{flash}}}{0.089}\right)^{0.63}",
+        "reference": "Ommen et al.",
+        "literature_year": "2015",
+        "data_year": "2013",
+        "cepci_ref": 567.0,
+    },
+    "dai": {
+        "label": "Dai et al.",
+        "formula": r"PEC_{\mathrm{flash}} = 280.3 \cdot \dot{m}^{0.67}",
+        "reference": "Dai et al.",
+        "literature_year": "2022",
+        "data_year": "2015-2016",
+        "cepci_ref": 555.0,
+    },
+}
+
+
+def _selected_pec_summary(costcalcparams, CEPCI_cur):
+    hex_model = PEC_HEX_OPTIONS[costcalcparams.get('hex_cost_model', 'ommen')]
+    comp_model = PEC_COMP_OPTIONS[costcalcparams.get('compressor_cost_model', 'ommen')]
+    flash_model = PEC_FLASH_OPTIONS[costcalcparams.get('flash_cost_model', 'ommen')]
+    rows = [
+        {
+            "Komponente": "Wärmeübertrager",
+            "Auswahl": hex_model["label"],
+            "Referenz": hex_model["reference"],
+            "Literaturjahr": hex_model["literature_year"],
+            "Datenjahr": hex_model["data_year"],
+            "CEPCI ref": f"{hex_model['cepci_ref']:.1f}",
+            "CEPCI-Faktor": f"{CEPCI_cur / hex_model['cepci_ref']:.3f}",
+        },
+        {
+            "Komponente": "Verdichter",
+            "Auswahl": comp_model["label"],
+            "Referenz": comp_model["reference"],
+            "Literaturjahr": comp_model["literature_year"],
+            "Datenjahr": comp_model["data_year"],
+            "CEPCI ref": f"{comp_model['cepci_ref']:.1f}",
+            "CEPCI-Faktor": f"{CEPCI_cur / comp_model['cepci_ref']:.3f}",
+        },
+        {
+            "Komponente": "Pumpe",
+            "Auswahl": PEC_PUMP_OPTION["label"],
+            "Referenz": PEC_PUMP_OPTION["reference"],
+            "Literaturjahr": PEC_PUMP_OPTION["literature_year"],
+            "Datenjahr": PEC_PUMP_OPTION["data_year"],
+            "CEPCI ref": f"{PEC_PUMP_OPTION['cepci_ref']:.1f}",
+            "CEPCI-Faktor": f"{CEPCI_cur / PEC_PUMP_OPTION['cepci_ref']:.3f}",
+        },
+        {
+            "Komponente": "Flashtank",
+            "Auswahl": flash_model["label"],
+            "Referenz": flash_model["reference"],
+            "Literaturjahr": flash_model["literature_year"],
+            "Datenjahr": flash_model["data_year"],
+            "CEPCI ref": f"{flash_model['cepci_ref']:.1f}",
+            "CEPCI-Faktor": f"{CEPCI_cur / flash_model['cepci_ref']:.3f}",
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
 def switch2design():
     """Switch to design simulation tab."""
     ss.select = 'Auslegung'
@@ -633,6 +769,43 @@ with st.sidebar:
                 key='tau_h_per_year'
             )
 
+            costcalcparams['hex_cost_model'] = st.selectbox(
+                'PEC Wärmeübertrager',
+                options=list(PEC_HEX_OPTIONS.keys()),
+                format_func=lambda x: PEC_HEX_OPTIONS[x]['label'],
+                index=list(PEC_HEX_OPTIONS.keys()).index(
+                    ss.get('hex_cost_model', 'ommen')
+                    if ss.get('hex_cost_model', 'ommen') in PEC_HEX_OPTIONS
+                    else 'ommen'
+                ),
+                key='hex_cost_model'
+            )
+
+            costcalcparams['compressor_cost_model'] = st.selectbox(
+                'PEC Verdichter',
+                options=list(PEC_COMP_OPTIONS.keys()),
+                format_func=lambda x: PEC_COMP_OPTIONS[x]['label'],
+                index=list(PEC_COMP_OPTIONS.keys()).index(
+                    ss.get('compressor_cost_model', 'ommen')
+                    if ss.get('compressor_cost_model', 'ommen') in PEC_COMP_OPTIONS
+                    else 'ommen'
+                ),
+                key='compressor_cost_model'
+            )
+
+            costcalcparams['flash_cost_model'] = st.selectbox(
+                'PEC Flashtank',
+                options=list(PEC_FLASH_OPTIONS.keys()),
+                format_func=lambda x: PEC_FLASH_OPTIONS[x]['label'],
+                index=list(PEC_FLASH_OPTIONS.keys()).index(
+                    ss.get('flash_cost_model', 'ommen')
+                    if ss.get('flash_cost_model', 'ommen') in PEC_FLASH_OPTIONS
+                    else 'ommen'
+                ),
+                key='flash_cost_model'
+            )
+            st.caption('Die Pumpenkorrelation ist aktuell fest auf Shamoushaki et al. gesetzt.')
+
             costcalcparams['k_evap'] = st.slider(
                 'Wärmedurchgangskoeffizient (Verdampfung)',
                 min_value=0, max_value=5000, step=10,
@@ -663,6 +836,29 @@ with st.sidebar:
                 min_value=0, max_value=60, step=1,
                 value=10, format='%d s', key='residence_time'
                 )
+
+        with st.expander('Parameter für Projektkostenabschätzung nach Kosmadakis et al. (2020)'):
+            costcalcparams['gas_price_cent_kWh'] = st.number_input(
+                'Gaspreis [ct/kWh]',
+                min_value=0.0, max_value=200.0, step=0.5,
+                value=float(ss.get('gas_price_cent_kWh', 8.0)),
+                key='gas_price_cent_kWh'
+            )
+
+            costcalcparams['gas_boiler_efficiency'] = st.number_input(
+                'Wirkungsgrad Ersatz-Gaskessel [-]',
+                min_value=0.1, max_value=1.0, step=0.01,
+                value=float(ss.get('gas_boiler_efficiency', 0.90)),
+                format='%.2f',
+                key='gas_boiler_efficiency'
+            )
+
+            costcalcparams['refrigerant_charge_kg'] = st.number_input(
+                'Kältemittelfüllmenge gesamt [kg]',
+                min_value=0.0, max_value=100000.0, step=1.0,
+                value=float(ss.get('refrigerant_charge_kg', 0.0)),
+                key='refrigerant_charge_kg'
+            )
 
         ss.costcalcparams = dict(costcalcparams)
         ss.hp_params = params
@@ -1544,7 +1740,6 @@ if mode == 'Auslegung':
                     ref_year = "2015" if "2015" in _cepci else min(_cepci.keys())
                     CEPCI_cur = float(_cepci[str(costcalcparams['current_year'])])
                     CEPCI_ref = float(_cepci[str(ref_year)])
-                    cepci_factor = CEPCI_cur / CEPCI_ref
 
                     # ===============================
                     # CAPEX / OPEX (NO exergy here)
@@ -1559,6 +1754,9 @@ if mode == 'Auslegung':
                         k_trans=float(costcalcparams.get('k_trans', 60.0)) if 'trans' in hp_model_name else 60.0,
                         k_econ=1500.0,
                         k_misc=float(costcalcparams.get('k_misc', 50.0)),
+                        hex_cost_model=costcalcparams.get('hex_cost_model', 'ommen'),
+                        compressor_cost_model=costcalcparams.get('compressor_cost_model', 'ommen'),
+                        flash_cost_model=costcalcparams.get('flash_cost_model', 'ommen'),
                         flash_residence_time_s=float(costcalcparams.get('residence_time', 10.0)),
                         tci_factor=6.32,
                         omc_rel=0.03,
@@ -1585,46 +1783,12 @@ if mode == 'Auslegung':
                     except Exception:
                         pass
 
-                    st.markdown("### Verwendete Kostengleichungen")
-                    st.markdown(
-                        f"""
-                        Die Komponentenpreise werden in dieser Oberfläche mit den im Paket
-                        implementierten Skalierungsgleichungen berechnet. Anschließend
-                        wird die Preisbasis mit dem CEPCI-Faktor korrigiert.
-
-                        Aktuell gilt:
-                        - `CEPCI-Referenzjahr = {ref_year}`
-                        - `CEPCI-Faktor = CEPCI_aktuell / CEPCI_ref = {CEPCI_cur:.1f} / {CEPCI_ref:.1f} = {cepci_factor:.3f}`
-                        - Strompreis für die Exergoökonomie: `c_el = (ct/kWh / 100) * 277.78`
-                        """
+                    st.markdown("**Ausgewählte PEC-Korrelationen**")
+                    st.dataframe(
+                        _selected_pec_summary(costcalcparams, CEPCI_cur),
+                        use_container_width=True,
+                        hide_index=True
                     )
-
-                    st.latex(r"PEC_{\mathrm{comp}} = 19{,}850 \left(\frac{\dot{V}_{in}}{279.8}\right)^{0.73} \cdot \frac{\mathrm{CEPCI}_{cur}}{\mathrm{CEPCI}_{ref}}")
-                    st.caption("Verdichterkosten aus dem Eintritts-Volumenstrom \\(\\dot{V}_{in}\\) in m³/h.")
-
-                    st.latex(r"PEC_{\mathrm{pump}} = \left(\log_{10}(\dot{W}_{P}) - 0.03195 \cdot \dot{W}_{P}^{2} + 467.2 \cdot \dot{W}_{P} + 20480\right) \cdot \frac{\mathrm{CEPCI}_{cur}}{\mathrm{CEPCI}_{ref}}")
-                    st.caption("Pumpenkosten aus der Pumpenleistung \\(\\dot{W}_{P}\\) in kW.")
-
-                    st.latex(r"\mathrm{LMTD} = \frac{\Delta T_1 - \Delta T_2}{\ln(\Delta T_1 / \Delta T_2)}, \qquad A = \frac{\dot{Q}}{k \cdot \mathrm{LMTD}}")
-                    st.latex(r"PEC_{\mathrm{HEX}} = 15{,}526 \left(\frac{A}{42}\right)^{0.8} \cdot \frac{\mathrm{CEPCI}_{cur}}{\mathrm{CEPCI}_{ref}}")
-                    st.caption("Wärmeübertragerkosten aus Fläche \\(A\\); der U-Wert \\(k\\) wird je nach Bauteiltyp gesetzt.")
-
-                    st.latex(r"PEC_{\mathrm{flash}} = 1{,}444 \left(\frac{V}{0.089}\right)^{0.63} \cdot \frac{\mathrm{CEPCI}_{cur}}{\mathrm{CEPCI}_{ref}}")
-                    st.caption("Flashtankkosten aus dem abgeschätzten Behältervolumen \\(V\\) in m³.")
-                    st.markdown(
-                        """
-                        `Z_k` ist die stündliche Kostenrate eines Bauteils. Dafür
-                        werden zuerst aus `TCI` die Kapitalrückzahlung und die
-                        jährlichen Betriebs- und Wartungskosten bestimmt. Danach
-                        werden diese Gesamtkosten proportional zum PEC-Anteil des
-                        jeweiligen Bauteils aufgeteilt und auf Vollbenutzungsstunden
-                        bezogen.
-                        """
-                    )
-                    st.caption("For more detailed information, please refer to the documentation.")
-                    st.latex(r"a = \frac{i_{eff} - r_n}{1 - \left(\frac{1+r_n}{1+i_{eff}}\right)^n}")
-                    st.latex(r"CCL = a \cdot \sum TCI_k, \qquad OMCL = f_{\mathrm{O\&M}} \cdot \sum TCI_k")
-                    st.latex(r"Z_k = \frac{(CCL + OMCL)\left(\frac{PEC_k}{\sum PEC_k}\right)}{\tau_h}")
                     st.caption(
                         "Mit i_eff = 8 %, r_n = 2 %, n = 20 Jahren, "
                         "f_O&M = 3 % und τ_h = Volllaststunden pro Jahr."
@@ -1745,6 +1909,99 @@ if mode == 'Auslegung':
                         st.markdown("### Exergoökonomische Ergebnisse")
                         st.markdown("**Komponenten**")
                         st.dataframe(st_safe_df(df_execo_comp), use_container_width=True, hide_index=True)
+
+                        st.markdown("### Projektkostenabschätzung nach Kosmadakis et al. (2020)")
+                        comp_by_label = {comp.label: comp for comp in ss.hp.comps.values()}
+
+                        def _component_class(label):
+                            comp = comp_by_label.get(label)
+                            return comp.__class__.__name__ if comp is not None else ""
+
+                        def _is_hex_label(label):
+                            cls = _component_class(label)
+                            return cls in {"Condenser", "HeatExchanger", "SimpleHeatExchanger", "DropletSeparator"}
+
+                        def _is_comp_label(label):
+                            return _component_class(label) == "Compressor"
+
+                        def _is_flash_label(label):
+                            cls = _component_class(label)
+                            return cls == "Drum" or "flash" in str(label).lower()
+
+                        pec_hex_sum = float(sum(val for lbl, val in PEC.items() if _is_hex_label(lbl)))
+                        pec_comp_sum = float(sum(val for lbl, val in PEC.items() if _is_comp_label(lbl)))
+                        pec_flash_sum = float(sum(val for lbl, val in PEC.items() if _is_flash_label(lbl)))
+                        base_equipment_cost = pec_hex_sum + pec_comp_sum + pec_flash_sum
+
+                        refrigerant_charge_kg = float(costcalcparams.get('refrigerant_charge_kg', 0.0))
+                        gas_price_cent_kWh = float(costcalcparams.get('gas_price_cent_kWh', 8.0))
+                        gas_boiler_efficiency = max(float(costcalcparams.get('gas_boiler_efficiency', 0.90)), 1e-9)
+
+                        C_p_t = 0.10 * base_equipment_cost
+                        C_el_CI = 0.10 * base_equipment_cost
+                        C_refrigerant = 50.0 * refrigerant_charge_kg
+                        C_total_kos = base_equipment_cost + C_refrigerant + C_p_t + C_el_CI
+                        C_project = 4.16 * C_total_kos
+
+                        try:
+                            Q_out_W = getattr(ss.hp, 'Q_out', None)
+                            if Q_out_W is None or (isinstance(Q_out_W, float) and np.isnan(Q_out_W)):
+                                if hasattr(ss.hp, '_get_heat_output_W'):
+                                    Q_out_W = ss.hp._get_heat_output_W()
+                                else:
+                                    Q_out_W = ss.hp.comps['cons'].Q.val
+                            annual_heat_kWh = abs(float(Q_out_W)) / 1e3 * float(tau_h_per_year)
+                        except Exception:
+                            annual_heat_kWh = 0.0
+
+                        try:
+                            annual_el_kWh = abs(float(ss.hp.conns['E0'].E.val)) / 1e3 * float(tau_h_per_year)
+                        except Exception:
+                            annual_el_kWh = 0.0
+
+                        gas_price_eur_kWh = gas_price_cent_kWh / 100.0
+                        elec_price_eur_kWh = float(elec_price_cent_kWh) / 100.0
+                        C_g = annual_heat_kWh * gas_price_eur_kWh / gas_boiler_efficiency
+                        C_el_OP = annual_el_kWh * elec_price_eur_kWh
+                        C_O_and_M_project = 0.02 * C_project
+                        E_s = C_g - C_el_OP - C_O_and_M_project
+                        r_discount = 0.05
+
+                        if E_s > C_project and (1.0 - C_project / E_s) > 0.0:
+                            PBP = np.log(1.0 / (1.0 - C_project / E_s)) / np.log(1.0 + r_discount)
+                        else:
+                            PBP = np.nan
+
+                        kc1, kc2, kc3 = st.columns(3)
+                        kc1.metric("C_project", f"{C_project:,.0f} €")
+                        kc2.metric("E_s", f"{E_s:,.0f} €/a")
+                        kc3.metric("PBP", "—" if np.isnan(PBP) else f"{PBP:,.2f} a")
+
+                        kos_rows = pd.DataFrame([
+                            {"Größe": "Σ PEC_HEX", "Wert": pec_hex_sum},
+                            {"Größe": "Σ PEC_compressor", "Wert": pec_comp_sum},
+                            {"Größe": "PEC_flashtank", "Wert": pec_flash_sum},
+                            {"Größe": "C_p-t", "Wert": C_p_t},
+                            {"Größe": "C_el^CI", "Wert": C_el_CI},
+                            {"Größe": "C_refrigerant", "Wert": C_refrigerant},
+                            {"Größe": "C_gesamt", "Wert": C_total_kos},
+                            {"Größe": "C_project", "Wert": C_project},
+                            {"Größe": "C_g", "Wert": C_g},
+                            {"Größe": "C_el^OP", "Wert": C_el_OP},
+                            {"Größe": "C_O&M", "Wert": C_O_and_M_project},
+                            {"Größe": "E_s", "Wert": E_s},
+                        ])
+                        st.dataframe(
+                            kos_rows.style.format({"Wert": "{:,.2f}"}),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                        st.caption(
+                            "Zusätzliche Annahmen für diesen Block: Gaspreis und Ersatz-Gaskesselwirkungsgrad "
+                            "sowie die gesamte Kältemittelfüllmenge sind Nutzereingaben. "
+                            "Der Diskontsatz für PBP ist fest auf 5 % gesetzt. "
+                            "Wenn E_s ≤ C_project, wird keine endliche diskontierte Amortisationszeit ausgewiesen."
+                        )
 
 
                 with exergy_container.expander('Exergiebewertung', expanded=True):

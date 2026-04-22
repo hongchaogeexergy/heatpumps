@@ -904,6 +904,10 @@ def build_costs(
     ean, hp, *,
     # default U-values [W/m²K]
     k_evap=1500.0, k_cond=3500.0, k_inter=2200.0, k_trans=60.0, k_econ=1500.0, k_misc=50.0,
+    # PEC correlation choices
+    hex_cost_model="ommen",
+    compressor_cost_model="ommen",
+    flash_cost_model="ommen",
     # flash tank costing
     flash_residence_time_s=10.0,
     flash_ref_cost=15000.0,
@@ -920,15 +924,45 @@ def build_costs(
     Returns dicts keyed by *component label*: PEC[€], TCI[€], Z[€/h].
 
     Rules:
-      - Compressors: inlet volumetric flow correlation (VM in m³/h).
+      - Compressors: selectable inlet volumetric-flow or power-based correlation.
       - Pumps: cost the pump (not the motor); prefer hydraulic power; fallback to motor electric power.
       - Motors / valves / buses / sources / cycle closers / split/merge, etc.: Z = 0 (auxiliaries).
       - Heat exchangers (Condenser, HeatExchanger, SimpleHeatExchanger, DropletSeparator/economizer):
-        A from Q/(k*LMTD).
+        A from Q/(k*LMTD), with selectable area-based cost correlation.
       - CRF uses i_eff with escalation r_n.
-      - Flash tank: volume-based placeholder correlation (tunable defaults).
+      - Flash tank: selectable volume- or mass-flow-based correlation.
     """
-    cepci = CEPCI_cur / CEPCI_ref
+    # Keep the global CEPCI_ref argument as backward-compatible fallback, but
+    # use literature-specific reference years for the selectable PEC models.
+    OMMEN_CEPCI_REF = 567.0
+    SHAMOUSH_CEPCI_REF = 596.0
+    DAI_CEPCI_REF = 555.0  # average of 2015/2016 values in the package data
+
+    if compressor_cost_model.startswith("shamoushaki"):
+        compressor_cepci = CEPCI_cur / SHAMOUSH_CEPCI_REF
+    elif compressor_cost_model == "ommen":
+        compressor_cepci = CEPCI_cur / OMMEN_CEPCI_REF
+    else:
+        compressor_cepci = CEPCI_cur / CEPCI_ref
+
+    pump_cepci = CEPCI_cur / SHAMOUSH_CEPCI_REF
+
+    if hex_cost_model.startswith("shamoushaki"):
+        hex_cepci = CEPCI_cur / SHAMOUSH_CEPCI_REF
+    elif hex_cost_model == "dai_cascade":
+        hex_cepci = CEPCI_cur / DAI_CEPCI_REF
+    elif hex_cost_model == "ommen":
+        hex_cepci = CEPCI_cur / OMMEN_CEPCI_REF
+    else:
+        hex_cepci = CEPCI_cur / CEPCI_ref
+
+    if flash_cost_model == "dai":
+        flash_cepci = CEPCI_cur / DAI_CEPCI_REF
+    elif flash_cost_model == "ommen":
+        flash_cepci = CEPCI_cur / OMMEN_CEPCI_REF
+    else:
+        flash_cepci = CEPCI_cur / CEPCI_ref
+
     PEC = {}
 
     comps = getattr(hp, "comps", {}) or {}
@@ -945,7 +979,27 @@ def build_costs(
             VM_m3_h = (m / max(rho, 1e-9)) * 3600.0
         except Exception:
             VM_m3_h = 279.8  # safe default
-        PEC[lbl] = 19850.0 * (VM_m3_h / 279.8) ** 0.73 * cepci
+        try:
+            Wcomp_kW = abs(float(comp.P.val)) / 1e3
+        except Exception:
+            Wcomp_kW = 1.0
+        if compressor_cost_model == "shamoushaki_centrifugal":
+            cost = (
+                math.log10(max(Wcomp_kW, 1e-9))
+                + 0.03867 * Wcomp_kW ** 2
+                + 4446.7 * Wcomp_kW
+                + 137800.0
+            ) * compressor_cepci
+        elif compressor_cost_model == "shamoushaki_reciprocating":
+            cost = (
+                math.log10(max(Wcomp_kW, 1e-9))
+                + 0.04147 * Wcomp_kW ** 2
+                + 454.8 * Wcomp_kW
+                + 181000.0
+            ) * compressor_cepci
+        else:
+            cost = 19850.0 * (VM_m3_h / 279.8) ** 0.73 * compressor_cepci
+        PEC[lbl] = max(cost, 0.0)
 
     # --- pumps (attach cost to the pump) -------------------------------------
     for _, comp in comps.items():
@@ -964,7 +1018,7 @@ def build_costs(
                 + 467.2 * Wp_kW
                 + 20480.0,
                 0.0
-            ) * cepci
+            ) * pump_cepci
         )
 
     # --- heat exchangers (area-based) ----------------------------------------
@@ -980,7 +1034,20 @@ def build_costs(
         if L <= 1e-6 or k <= 1.0:
             return None
         A = Q / (k * L)
-        return 15526.0 * (max(A, 1e-3) / 42.0) ** 0.8 * cepci
+        A = max(A, 1e-3)
+        if hex_cost_model == "dai_cascade":
+            return 383.5 * A ** 0.65 * hex_cepci
+        if hex_cost_model == "shamoushaki_shell":
+            return max(
+                math.log10(A) - 0.06395 * A ** 2 + 947.2 * A + 227.9,
+                0.0
+            ) * hex_cepci
+        if hex_cost_model == "shamoushaki_plate":
+            return max(
+                math.log10(A) + 0.2581 * A ** 2 + 891.7 * A + 26050.0,
+                0.0
+            ) * hex_cepci
+        return 15526.0 * (A / 42.0) ** 0.8 * hex_cepci
 
     HEX_TOKENS = ("condenser", "heatexchanger", "simpleheatexchanger", "dropletseparator",
                   "economizer", "transcritical", "evap", "consumer", "intermediate")
@@ -1043,16 +1110,30 @@ def build_costs(
     for _, comp in comps.items():
         lbl = str(getattr(comp, "label", "") or "")
         if any(tok in lbl.lower() for tok in FLASH_TOKENS):
-            V_m3 = _flash_volume_m3(comp, flash_residence_time_s, flash_rho_default)
-            if V_m3:
-                # Receiver correlation (used for flash tank): C_rec = 1444 * (V_rec/0.089)^0.63
-                # Apply CEPCI correction consistently with other correlations.
-                PEC[lbl] = max(
-                    PEC.get(lbl, 0.0),
-                    1444.0 * (V_m3 / 0.089) ** 0.63 * cepci
-                )
+            if flash_cost_model == "dai":
+                m_in = None
+                for port in (getattr(comp, "inl", None) or []):
+                    m_val = _port_val(port, "m")
+                    if m_val is not None and m_val > 0:
+                        m_in = m_val if m_in is None else max(m_in, m_val)
+                if m_in:
+                    PEC[lbl] = max(
+                        PEC.get(lbl, 0.0),
+                        280.3 * m_in ** 0.67 * flash_cepci
+                    )
+                else:
+                    PEC.setdefault(lbl, 0.0)
             else:
-                PEC.setdefault(lbl, 0.0)
+                V_m3 = _flash_volume_m3(comp, flash_residence_time_s, flash_rho_default)
+                if V_m3:
+                    # Receiver correlation (used for flash tank): C_rec = 1444 * (V_rec/0.089)^0.63
+                    # Apply CEPCI correction consistently with other correlations.
+                    PEC[lbl] = max(
+                        PEC.get(lbl, 0.0),
+                        1444.0 * (V_m3 / 0.089) ** 0.63 * flash_cepci
+                    )
+                else:
+                    PEC.setdefault(lbl, 0.0)
 
     # --- auxiliaries (never costed) ------------------------------------------
     AUX_TOKENS = ("motor", "cycle closer", "cyclecloser", "valve",
@@ -1183,10 +1264,14 @@ def build_Exe_Eco_Costs(
 
     internal_zero_labels = internal_zero_labels or []
 
-    # fuel inputs get electricity price
+    # Only the external electric fuel stream E0 gets the electricity price.
+    # Thermal source-side fuel streams such as B1 are treated as free by
+    # default unless explicitly overridden by the user cost dictionary.
     for lbl in (fuel.get("inputs") or []):
         if lbl in ean_conns:
-            Exe_Eco_Costs[f"{lbl}_c"] = elec_price_eur_per_GJ
+            Exe_Eco_Costs[f"{lbl}_c"] = (
+                elec_price_eur_per_GJ if lbl == "E0" else 0.0
+            )
 
     # NEW: internal non-material legs explicitly set to zero price
     for lbl in internal_zero_labels:
@@ -1202,14 +1287,6 @@ def build_Exe_Eco_Costs(
         for lbl in (loss.get("inputs") or []):
             if lbl in ean_conns:
                 Exe_Eco_Costs[f"{lbl}_c"] = 0.0
-
-
-    # DEBUG sanity check (remove after)
-    must_have = ["E0", "E1", "E2", "E3", "e1", "e2", "e3"]
-    missing = [f"{x}_c" for x in must_have if f"{x}_c" not in Exe_Eco_Costs]
-    if missing:
-        print("[COST-DBG] Missing expected power-leg costs:", missing)
-
 
     return Exe_Eco_Costs
 
@@ -1446,6 +1523,9 @@ def run_exergoeconomic_from_hp(
         k_trans=float(costcalcparams.get("k_trans", 60.0)) if "k_trans" in costcalcparams else 60.0,
         k_econ=float(costcalcparams.get("k_econ", 1500.0)) if "k_econ" in costcalcparams else 1500.0,
         k_misc=float(costcalcparams.get("k_misc", 50.0)),
+        hex_cost_model=str(costcalcparams.get("hex_cost_model", "ommen")),
+        compressor_cost_model=str(costcalcparams.get("compressor_cost_model", "ommen")),
+        flash_cost_model=str(costcalcparams.get("flash_cost_model", "ommen")),
         flash_residence_time_s=float(costcalcparams.get("residence_time", 10.0)),
         tci_factor=tci_factor,
         omc_rel=omc_rel,

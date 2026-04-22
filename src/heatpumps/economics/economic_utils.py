@@ -2,7 +2,11 @@
 import logging
 from exerpy import ExergoeconomicAnalysis
 from heatpumps.economics.econ_params import EconParams
-from heatpumps.economics.exerpy_costing import build_costs
+from heatpumps.economics.exerpy_costing import (
+    build_costs,
+    build_exergo_boundaries,
+    build_Exe_Eco_Costs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,27 +52,22 @@ def run_full_economic_pipeline(hp, econ: EconParams):
     capex_total = sum(capex_breakdown.values())
     opex_total = sum(opex_breakdown.values())
 
-    # --- Build Exergoeconomic Cost Dict (component cost rates) ---
-    Exe_Eco_Costs = {f"{comp}_Z": z for comp, z in Z.items()}
-
-    # Electricity price → €/GJ  (1 GJ = 277.78 kWh)
-    elec_cost_eur_per_kWh = econ.electricity_price_cent_per_kWh / 100.0
-    elec_cost_eur_per_GJ = elec_cost_eur_per_kWh * 277.78
-
     ean = hp.ean
-
-    # Initialize all connection costs to zero
-    for conn_label in ean.connections.keys():
-        Exe_Eco_Costs[f"{conn_label}_c"] = 0.0
-
-    # Assign electricity price to fuel inputs
-    fuel_inputs = getattr(ean, "fuel_input_labels", None)
-    if fuel_inputs:
-        for lbl in fuel_inputs:
-            Exe_Eco_Costs[f"{lbl}_c"] = elec_cost_eur_per_GJ
-    else:
-        for lbl in sorted([l for l in ean.connections if l.startswith("E")]):
-            Exe_Eco_Costs[f"{lbl}_c"] = elec_cost_eur_per_GJ
+    fuel_inputs, internal_zero, product, loss = build_exergo_boundaries(ean, hp)
+    boundaries = {
+        "fuel": {"inputs": list(fuel_inputs), "outputs": []},
+        "product": product,
+        "loss": loss,
+    }
+    Exe_Eco_Costs = build_Exe_Eco_Costs(
+        ean=ean,
+        hp=hp,
+        boundaries=boundaries,
+        internal_zero_labels=internal_zero,
+        elec_price_cent_kWh=float(econ.electricity_price_cent_per_kWh),
+        Z_by_component_label=Z,
+        set_product_and_loss_to_zero=True,
+    )
 
     # Apply user overrides if provided
     for key, val in getattr(econ, "overrides", {}).items():
