@@ -26,6 +26,7 @@ PEC_HEX_OPTIONS = {
         "literature_year": "2015",
         "data_year": "2013",
         "cepci_ref": 567.0,
+        "currency": "EUR",
     },
     "dai_cascade": {
         "label": "Dai et al. (Kaskaden-WT)",
@@ -34,6 +35,7 @@ PEC_HEX_OPTIONS = {
         "literature_year": "2022",
         "data_year": "2015-2016",
         "cepci_ref": 555.0,
+        "currency": "USD",
     },
     "shamoushaki_shell": {
         "label": "Shamoushaki (Rohrbündel)",
@@ -42,6 +44,7 @@ PEC_HEX_OPTIONS = {
         "literature_year": "2021",
         "data_year": "2020",
         "cepci_ref": 596.0,
+        "currency": "USD",
     },
     "shamoushaki_plate": {
         "label": "Shamoushaki (Platte)",
@@ -50,6 +53,7 @@ PEC_HEX_OPTIONS = {
         "literature_year": "2021",
         "data_year": "2020",
         "cepci_ref": 596.0,
+        "currency": "USD",
     },
 }
 
@@ -61,6 +65,7 @@ PEC_COMP_OPTIONS = {
         "literature_year": "2015",
         "data_year": "2013",
         "cepci_ref": 567.0,
+        "currency": "EUR",
     },
     "shamoushaki_centrifugal": {
         "label": "Shamoushaki (Zentrifugalverdichter)",
@@ -69,6 +74,7 @@ PEC_COMP_OPTIONS = {
         "literature_year": "2021",
         "data_year": "2020",
         "cepci_ref": 596.0,
+        "currency": "USD",
     },
     "shamoushaki_reciprocating": {
         "label": "Shamoushaki (Hubkolbenverdichter)",
@@ -77,6 +83,7 @@ PEC_COMP_OPTIONS = {
         "literature_year": "2021",
         "data_year": "2020",
         "cepci_ref": 596.0,
+        "currency": "USD",
     },
 }
 
@@ -87,6 +94,7 @@ PEC_PUMP_OPTION = {
     "literature_year": "2021",
     "data_year": "2020",
     "cepci_ref": 596.0,
+    "currency": "USD",
 }
 
 PEC_FLASH_OPTIONS = {
@@ -97,6 +105,7 @@ PEC_FLASH_OPTIONS = {
         "literature_year": "2015",
         "data_year": "2013",
         "cepci_ref": 567.0,
+        "currency": "EUR",
     },
     "dai": {
         "label": "Dai et al.",
@@ -105,11 +114,13 @@ PEC_FLASH_OPTIONS = {
         "literature_year": "2022",
         "data_year": "2015-2016",
         "cepci_ref": 555.0,
+        "currency": "USD",
     },
 }
 
 
 def _selected_pec_summary(costcalcparams, CEPCI_cur):
+    usd_to_eur = float(costcalcparams.get('usd_to_eur', 0.93))
     hex_model = PEC_HEX_OPTIONS[costcalcparams.get('hex_cost_model', 'ommen')]
     comp_model = PEC_COMP_OPTIONS[costcalcparams.get('compressor_cost_model', 'ommen')]
     flash_model = PEC_FLASH_OPTIONS[costcalcparams.get('flash_cost_model', 'ommen')]
@@ -120,6 +131,8 @@ def _selected_pec_summary(costcalcparams, CEPCI_cur):
             "Referenz": hex_model["reference"],
             "Literaturjahr": hex_model["literature_year"],
             "Datenjahr": hex_model["data_year"],
+            "Basiswährung": hex_model["currency"],
+            "Währungsfaktor": f"{usd_to_eur:.3f}" if hex_model["currency"] == "USD" else "1.000",
             "CEPCI ref": f"{hex_model['cepci_ref']:.1f}",
             "CEPCI-Faktor": f"{CEPCI_cur / hex_model['cepci_ref']:.3f}",
         },
@@ -129,6 +142,8 @@ def _selected_pec_summary(costcalcparams, CEPCI_cur):
             "Referenz": comp_model["reference"],
             "Literaturjahr": comp_model["literature_year"],
             "Datenjahr": comp_model["data_year"],
+            "Basiswährung": comp_model["currency"],
+            "Währungsfaktor": f"{usd_to_eur:.3f}" if comp_model["currency"] == "USD" else "1.000",
             "CEPCI ref": f"{comp_model['cepci_ref']:.1f}",
             "CEPCI-Faktor": f"{CEPCI_cur / comp_model['cepci_ref']:.3f}",
         },
@@ -138,6 +153,8 @@ def _selected_pec_summary(costcalcparams, CEPCI_cur):
             "Referenz": PEC_PUMP_OPTION["reference"],
             "Literaturjahr": PEC_PUMP_OPTION["literature_year"],
             "Datenjahr": PEC_PUMP_OPTION["data_year"],
+            "Basiswährung": PEC_PUMP_OPTION["currency"],
+            "Währungsfaktor": f"{usd_to_eur:.3f}",
             "CEPCI ref": f"{PEC_PUMP_OPTION['cepci_ref']:.1f}",
             "CEPCI-Faktor": f"{CEPCI_cur / PEC_PUMP_OPTION['cepci_ref']:.3f}",
         },
@@ -147,6 +164,8 @@ def _selected_pec_summary(costcalcparams, CEPCI_cur):
             "Referenz": flash_model["reference"],
             "Literaturjahr": flash_model["literature_year"],
             "Datenjahr": flash_model["data_year"],
+            "Basiswährung": flash_model["currency"],
+            "Währungsfaktor": f"{usd_to_eur:.3f}" if flash_model["currency"] == "USD" else "1.000",
             "CEPCI ref": f"{flash_model['cepci_ref']:.1f}",
             "CEPCI-Faktor": f"{CEPCI_cur / flash_model['cepci_ref']:.3f}",
         },
@@ -767,6 +786,14 @@ with st.sidebar:
                 min_value=0.0, max_value=9000.0, step=100.0,
                 value=float(ss.get('tau_h_per_year', 5500.0)),
                 key='tau_h_per_year'
+            )
+
+            costcalcparams['usd_to_eur'] = st.number_input(
+                'Währungsumrechnung USD → EUR [-]',
+                min_value=0.1, max_value=5.0, step=0.01,
+                value=float(ss.get('usd_to_eur', 0.93)),
+                format='%.2f',
+                key='usd_to_eur'
             )
 
             costcalcparams['hex_cost_model'] = st.selectbox(
@@ -1754,6 +1781,7 @@ if mode == 'Auslegung':
                         k_trans=float(costcalcparams.get('k_trans', 60.0)) if 'trans' in hp_model_name else 60.0,
                         k_econ=1500.0,
                         k_misc=float(costcalcparams.get('k_misc', 50.0)),
+                        usd_to_eur=float(costcalcparams.get('usd_to_eur', 0.93)),
                         hex_cost_model=costcalcparams.get('hex_cost_model', 'ommen'),
                         compressor_cost_model=costcalcparams.get('compressor_cost_model', 'ommen'),
                         flash_cost_model=costcalcparams.get('flash_cost_model', 'ommen'),

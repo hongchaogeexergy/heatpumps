@@ -904,6 +904,8 @@ def build_costs(
     ean, hp, *,
     # default U-values [W/m²K]
     k_evap=1500.0, k_cond=3500.0, k_inter=2200.0, k_trans=60.0, k_econ=1500.0, k_misc=50.0,
+    # currency conversion for USD-based correlations
+    usd_to_eur=0.93,
     # PEC correlation choices
     hex_cost_model="ommen",
     compressor_cost_model="ommen",
@@ -939,25 +941,25 @@ def build_costs(
     DAI_CEPCI_REF = 555.0  # average of 2015/2016 values in the package data
 
     if compressor_cost_model.startswith("shamoushaki"):
-        compressor_cepci = CEPCI_cur / SHAMOUSH_CEPCI_REF
+        compressor_cepci = (CEPCI_cur / SHAMOUSH_CEPCI_REF) * usd_to_eur
     elif compressor_cost_model == "ommen":
         compressor_cepci = CEPCI_cur / OMMEN_CEPCI_REF
     else:
         compressor_cepci = CEPCI_cur / CEPCI_ref
 
-    pump_cepci = CEPCI_cur / SHAMOUSH_CEPCI_REF
+    pump_cepci = (CEPCI_cur / SHAMOUSH_CEPCI_REF) * usd_to_eur
 
     if hex_cost_model.startswith("shamoushaki"):
-        hex_cepci = CEPCI_cur / SHAMOUSH_CEPCI_REF
+        hex_cepci = (CEPCI_cur / SHAMOUSH_CEPCI_REF) * usd_to_eur
     elif hex_cost_model == "dai_cascade":
-        hex_cepci = CEPCI_cur / DAI_CEPCI_REF
+        hex_cepci = (CEPCI_cur / DAI_CEPCI_REF) * usd_to_eur
     elif hex_cost_model == "ommen":
         hex_cepci = CEPCI_cur / OMMEN_CEPCI_REF
     else:
         hex_cepci = CEPCI_cur / CEPCI_ref
 
     if flash_cost_model == "dai":
-        flash_cepci = CEPCI_cur / DAI_CEPCI_REF
+        flash_cepci = (CEPCI_cur / DAI_CEPCI_REF) * usd_to_eur
     elif flash_cost_model == "ommen":
         flash_cepci = CEPCI_cur / OMMEN_CEPCI_REF
     else:
@@ -1523,6 +1525,7 @@ def run_exergoeconomic_from_hp(
         k_trans=float(costcalcparams.get("k_trans", 60.0)) if "k_trans" in costcalcparams else 60.0,
         k_econ=float(costcalcparams.get("k_econ", 1500.0)) if "k_econ" in costcalcparams else 1500.0,
         k_misc=float(costcalcparams.get("k_misc", 50.0)),
+        usd_to_eur=float(costcalcparams.get("usd_to_eur", 0.93)),
         hex_cost_model=str(costcalcparams.get("hex_cost_model", "ommen")),
         compressor_cost_model=str(costcalcparams.get("compressor_cost_model", "ommen")),
         flash_cost_model=str(costcalcparams.get("flash_cost_model", "ommen")),
