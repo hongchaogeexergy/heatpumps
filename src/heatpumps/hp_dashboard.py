@@ -1896,7 +1896,7 @@ if mode == 'Auslegung':
                     # Run exergoeconomic analysis
                     # ===============================
                     try:
-                        df_execo_comp, df_mat1, df_mat2, df_non_mat, ean, Exe_Eco_Costs = run_exergoeconomic_from_hp(
+                        df_execo_comp, df_mat1, df_mat2, df_non_mat, df_execo_eval, ean, Exe_Eco_Costs = run_exergoeconomic_from_hp(
                             hp=ss.hp,
                             Tamb_K=Tamb_K,
                             pamb_Pa=pamb_Pa,
@@ -1923,7 +1923,7 @@ if mode == 'Auslegung':
                         import traceback
                         st.error(f"❌ Exergoökonomische Analyse fehlgeschlagen:\n{exc}")
                         st.code(traceback.format_exc())  # <-- FULL traceback in UI
-                        df_execo_comp = df_mat1 = df_mat2 = df_non_mat = None
+                        df_execo_comp = df_mat1 = df_mat2 = df_non_mat = df_execo_eval = None
                         Exe_Eco_Costs = None
 
 
@@ -1937,6 +1937,12 @@ if mode == 'Auslegung':
                         st.markdown("### Exergoökonomische Ergebnisse")
                         st.markdown("**Komponenten**")
                         st.dataframe(st_safe_df(df_execo_comp), use_container_width=True, hide_index=True)
+
+                        if df_execo_eval is not None:
+                            if "Component" not in df_execo_eval.columns:
+                                df_execo_eval = df_execo_eval.reset_index().rename(columns={"index": "Component"})
+                            st.markdown("**Bewertung der wichtigsten Komponenten (`evaluate_results`)**")
+                            st.dataframe(st_safe_df(df_execo_eval), use_container_width=True, hide_index=True)
 
                         st.markdown("### Projektkostenabschätzung nach Kosmadakis et al. (2020)")
                         comp_by_label = {comp.label: comp for comp in ss.hp.comps.values()}

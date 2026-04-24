@@ -2,6 +2,8 @@
 import math
 import os
 import logging
+import io
+from contextlib import redirect_stdout
 from exerpy import ExergyAnalysis, ExergoeconomicAnalysis
 import numpy as np
 from collections.abc import MutableMapping
@@ -1373,7 +1375,7 @@ def run_exergoeconomic_from_hp(
     - Runs ExergoeconomicAnalysis and returns its DataFrames
 
     Returns:
-      df_comp, df_mat1, df_mat2, df_non_mat, ean, Exe_Eco_Costs
+      df_comp, df_mat1, df_mat2, df_non_mat, df_eval, ean, Exe_Eco_Costs
     """
     #_ensure_equations_attr_for_exerpy(hp)
     econ_params = econ_params or {}
@@ -1653,32 +1655,64 @@ def run_exergoeconomic_from_hp(
         df_mat1_ex = None
         df_mat2_ex = None
         df_non_mat_ex = None
+        df_eval_ex = None
 
-        # Try common ExerPy APIs (version differences)
-        for meth in ("exergoeconomic_results", "results", "get_results"):
-            if hasattr(exa, meth):
+        # Preferred API from ExerPy documentation
+        if hasattr(exa, "exergoeconomic_results"):
+            try:
+                out = exa.exergoeconomic_results(print_results=False)
+            except TypeError:
+                out = exa.exergoeconomic_results()
+            except Exception:
+                out = None
+
+            if isinstance(out, tuple):
+                if len(out) >= 4:
+                    df_execo_comp, df_mat1_ex, df_mat2_ex, df_non_mat_ex = out[:4]
+                elif len(out) == 3:
+                    df_execo_comp, df_mat1_ex, df_non_mat_ex = out
+                    df_mat2_ex = None
+
+        # Compatibility fallback for older/newer APIs
+        if df_execo_comp is None:
+            for meth in ("results", "get_results"):
+                if hasattr(exa, meth):
+                    try:
+                        out = getattr(exa, meth)(print_results=False)
+                    except TypeError:
+                        out = getattr(exa, meth)()
+                    except Exception:
+                        out = None
+
+                    if isinstance(out, tuple):
+                        if len(out) >= 4:
+                            df_execo_comp, df_mat1_ex, df_mat2_ex, df_non_mat_ex = out[:4]
+                            break
+                        elif len(out) == 3:
+                            df_execo_comp, df_mat1_ex, df_non_mat_ex = out
+                            df_mat2_ex = None
+                            break
+
+        # ExerPy evaluation helper: ranked component importance
+        if hasattr(exa, "evaluate_results"):
+            try:
+                with redirect_stdout(io.StringIO()):
+                    df_eval_ex = exa.evaluate_results(top_n=5, sort_by="C_D+Z")
+            except TypeError:
                 try:
-                    out = getattr(exa, meth)(print_results=False)
-                except TypeError:
-                    out = getattr(exa, meth)()
+                    with redirect_stdout(io.StringIO()):
+                        df_eval_ex = exa.evaluate_results()
                 except Exception:
-                    out = None
-
-                if isinstance(out, tuple):
-                    if len(out) >= 4:
-                        df_execo_comp, df_mat1_ex, df_mat2_ex, df_non_mat_ex = out[:4]
-                        break
-                    elif len(out) == 3:
-                        df_execo_comp, df_mat1_ex, df_non_mat_ex = out
-                        df_mat2_ex = None
-                        break
+                    df_eval_ex = None
+            except Exception:
+                df_eval_ex = None
 
         # Fallback (don’t overwrite the exergy df_mat1 you already have)
         if df_execo_comp is None:
             df_execo_comp = df_comp
             df_mat1_ex = df_mat1
             df_mat2_ex = None
-            df_non_mat_ex = df_non_mat            
+            df_non_mat_ex = df_non_mat
 
 
     except Exception as e:
@@ -1688,4 +1722,4 @@ def run_exergoeconomic_from_hp(
         raise
 
 
-    return df_execo_comp, df_mat1_ex, df_mat2_ex, df_non_mat_ex, ean, Exe_Eco_Costs
+    return df_execo_comp, df_mat1_ex, df_mat2_ex, df_non_mat_ex, df_eval_ex, ean, Exe_Eco_Costs
