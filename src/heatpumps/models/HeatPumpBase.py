@@ -666,79 +666,142 @@ class HeatPumpBase:
             return diagram
 
     def generate_sankey_diagram(self, width=None, height=None):
-        """Custom Sankey Diagram of Heat Pump model based on ExergyAnalysis results."""
+        """Component-oriented Sankey diagram based on exergy destruction shares."""
         import plotly.graph_objects as go
+        if not hasattr(self, "ean"):
+            raise RuntimeError("Exergy analysis has not been performed yet.")
 
-        nodes = [
-            'Electrical Input (E_F)',  # 0
-            'Exergy Loss (E_L)',       # 1
-            'Exergy Destruction (E_D)',# 2
-            'Useful Output (E_P)'      # 3
-        ]
+        comp_df = getattr(self, "component_exergy_df", None)
+        if comp_df is None:
+            comp_df, _, _ = self.ean.exergy_results(print_results=False)
+
+        comp_df = comp_df.copy()
+        if "Component" not in comp_df.columns:
+            comp_df = comp_df.reset_index().rename(columns={"index": "Component"})
+
+        for col in ["E_D [kW]", "E_P [kW]", "E_F [kW]", "E_L [kW]"]:
+            if col in comp_df.columns:
+                comp_df[col] = pd.to_numeric(comp_df[col], errors="coerce")
+
+        comp_df = comp_df[comp_df["Component"].astype(str) != "TOT"]
+        comp_df = comp_df.dropna(subset=["E_D [kW]"]) if "E_D [kW]" in comp_df.columns else comp_df.iloc[0:0]
+        comp_df = comp_df[comp_df["E_D [kW]"] > 1e-6].sort_values("E_D [kW]", ascending=False)
 
         colors = {
-            'E_F': '#00395B',
-            'E_P': '#B54036',
-            'E_L': '#EC6707',
-            'E_D': '#EC6707'
+            "E_F": "#00395B",
+            "E_P": "#B54036",
+            "E_L": "#74ADC0",
+            "E_D": "#EC6707",
+            "component": "#BFBFBF",
         }
 
-        E_F = self.ean.E_F
-        E_P = self.ean.E_P
-        E_L = self.ean.E_L
-        E_D = self.ean.E_D
+        nodes = ["Fuel Exergy", "Exergy Destruction"]
+        node_colors = [colors["E_F"], colors["E_D"]]
+        link_source = []
+        link_target = []
+        link_value = []
+        link_label = []
+        link_color = []
 
-        links = dict(
-            source=[0, 0, 0],
-            target=[1, 2, 3],
-            value=[E_L, E_D, E_P],
-            label=['E_L', 'E_D', 'E_P'],
-            color=[colors['E_L'], colors['E_D'], colors['E_P']]
-        )
+        for _, row in comp_df.iterrows():
+            comp_name = str(row["Component"])
+            nodes.append(comp_name)
+            comp_idx = len(nodes) - 1
+            node_colors.append(colors["component"])
+            ed_kW = float(row["E_D [kW]"])
 
-        fig = go.Figure(
-            go.Sankey(
-                arrangement='snap',
-                node={'label': nodes, 'pad': 15, 'color': '#EC6707'},
-                link=dict(
-                    source=links['source'],
-                    target=links['target'],
-                    value=links['value'],
-                    label=links['label'],
-                    color=links['color']
-                )
+            link_source.append(0)
+            link_target.append(comp_idx)
+            link_value.append(ed_kW)
+            link_label.append(f"{comp_name}: fuel share")
+            link_color.append(colors["component"])
+
+            link_source.append(comp_idx)
+            link_target.append(1)
+            link_value.append(ed_kW)
+            link_label.append(f"{comp_name}: E_D")
+            link_color.append(colors["E_D"])
+
+        product_kW = float(getattr(self, "E_P", 0.0)) / 1e3
+        loss_kW = float(getattr(self, "E_L", 0.0)) / 1e3
+
+        if product_kW > 1e-6:
+            nodes.append("Useful Output")
+            node_colors.append(colors["E_P"])
+            link_source.append(0)
+            link_target.append(len(nodes) - 1)
+            link_value.append(product_kW)
+            link_label.append("E_P")
+            link_color.append(colors["E_P"])
+
+        if loss_kW > 1e-6:
+            nodes.append("Exergy Loss")
+            node_colors.append(colors["E_L"])
+            link_source.append(0)
+            link_target.append(len(nodes) - 1)
+            link_value.append(loss_kW)
+            link_label.append("E_L")
+            link_color.append(colors["E_L"])
+
+        fig = go.Figure(go.Sankey(
+            arrangement='snap',
+            node={'label': nodes, 'pad': 15, 'color': node_colors},
+            link=dict(
+                source=link_source,
+                target=link_target,
+                value=link_value,
+                label=link_label,
+                color=link_color
             )
-        )
+        ))
 
         if width is not None:
             fig.update_layout(width=width)
         if height is not None:
             fig.update_layout(height=height)
 
-        fig.update_layout(title_text="Exergy Flow Sankey Diagram", font_size=12)
+        fig.update_layout(title_text="Exergy Sankey Diagram", font_size=12)
         return fig
 
     def generate_waterfall_diagram(self, figsize=(16, 10), legend=True,
                                    return_fig_ax=False, show_epsilon=True):
-        """Generates waterfall diagram of exergy analysis (manual version)."""
+        """Generate component-oriented exergy waterfall diagram."""
+        if not hasattr(self, "ean"):
+            raise RuntimeError("Exergy analysis has not been performed yet.")
+
+        comp_df = getattr(self, "component_exergy_df", None)
+        if comp_df is None:
+            comp_df, _, _ = self.ean.exergy_results(print_results=False)
+
+        comp_df = comp_df.copy()
+        if "Component" not in comp_df.columns:
+            comp_df = comp_df.reset_index().rename(columns={"index": "Component"})
+
+        if "E_D [kW]" not in comp_df.columns:
+            raise RuntimeError("Component exergy results do not contain 'E_D [kW]'.")
+
+        comp_df["E_D [kW]"] = pd.to_numeric(comp_df["E_D [kW]"], errors="coerce")
+        comp_df = comp_df[comp_df["Component"].astype(str) != "TOT"]
+        comp_df = comp_df.dropna(subset=["E_D [kW]"]).sort_values(by="E_D [kW]", ascending=False)
+
         comps = ['Fuel Exergy']
-        E_F_total = self.ean.E_F
+        E_F_total = float(self.ean.E_F)
         E_D = [0]
         E_P = [E_F_total]
 
-        comp_data = self.ean._component_data.get('component_exergy', None)
-        if comp_data is not None:
-            comp_data = comp_data.dropna(subset=['E_D'])
-            for comp in comp_data.sort_values(by='E_D', ascending=False).index:
-                if comp_data.at[comp, 'E_D'] > 1:
-                    comps.append(comp)
-                    E_D.append(comp_data.at[comp, 'E_D'])
-                    E_F_total -= comp_data.at[comp, 'E_D']
-                    E_P.append(E_F_total)
+        for _, row in comp_df.iterrows():
+            ed_kw = float(row["E_D [kW]"])
+            if ed_kw <= 1e-6:
+                continue
+            comps.append(str(row["Component"]))
+            ed_W = ed_kw * 1e3
+            E_D.append(ed_W)
+            E_F_total -= ed_W
+            E_P.append(max(E_F_total, 0.0))
 
         comps.append('Product Exergy')
         E_D.append(0)
-        E_P.append(E_F_total)
+        E_P.append(max(E_F_total, 0.0))
 
         # Convert to kW
         E_D = [e * 1e-3 for e in E_D]

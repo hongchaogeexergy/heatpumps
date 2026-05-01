@@ -781,6 +781,14 @@ with st.sidebar:
                 key='elec_price_cent_kWh'
             )
 
+            costcalcparams['b1_cost_eur_per_GJ'] = st.number_input(
+                'Kosten Feedwater B1 [EUR/GJ]',
+                min_value=0.0, max_value=10000.0, step=0.1,
+                value=float(ss.get('b1_cost_eur_per_GJ', 0.0)),
+                format='%.2f',
+                key='b1_cost_eur_per_GJ'
+            )
+
             costcalcparams['tau_h_per_year'] = st.number_input(
                 'Volllaststunden [h/a]',
                 min_value=0.0, max_value=9000.0, step=100.0,
@@ -2147,14 +2155,14 @@ if mode == 'Auslegung':
                         language="python"
                     )
                     st.code(
-                        'Case B — waste heat, return still above or is the same as ambient.\n\n'
+                        'Case B — Standardvariante: Abwärme, die abgekühlt wird. Die Austrittstemperatur kann über oder gleich der Umgebungstemperatur werden.\n\n'
                         'fuel = {"inputs": ["E0", "B1"], "outputs": []}\n'
                         'product = {"inputs": ["C3"], "outputs": ["C1"]}\n'
                         'loss = {"inputs": ["B3"], "outputs": []}',
                         language="python"
                     )
                     st.code(
-                        'Case C — Spezieller Fall, waste heat, return still above ambient\n\n'
+                        'Case C — Abwärme, die abgekühlt wird. Die Austrittstemperatur ist über Umgebungstemperatur und kann in weiteren Anlagen als Abwärme verwertet werden.\n\n'
                         'fuel = {"inputs": ["E0","B1"], "outputs": []}\n'
                         'product = {"inputs": ["C3"], "outputs": ["C1"]}\n'
                         'loss = {"inputs": [""], "outputs": [""]}',
@@ -2214,19 +2222,23 @@ if mode == 'Auslegung':
                     col6, col7 = st.columns(2)
                     with col6:
                         st.subheader('Grassmann Diagramm')
-                        st.caption('!!Diese Darstellung ist aktuell noch in Bearbeitung')
+                        diagram_placeholder_sankey = st.empty()
                         try:
                             diagram_sankey = ss.hp.generate_sankey_diagram()
-                            st.plotly_chart(diagram_sankey, use_container_width=True)
+                            diagram_placeholder_sankey.plotly_chart(
+                                diagram_sankey, use_container_width=True
+                            )
                         except Exception as e:
                             st.info(f"Sankey ausgelassen: {e}")
 
                     with col7:
                         st.subheader('Wasserfall Diagramm')
-                        st.caption('!!Diese Darstellung ist aktuell noch in Bearbeitung')
+                        diagram_placeholder_waterfall = st.empty()
                         try:
                             dia_wf_fig, _ = ss.hp.generate_waterfall_diagram(return_fig_ax=True)
-                            st.pyplot(dia_wf_fig, use_container_width=True)
+                            diagram_placeholder_waterfall.pyplot(
+                                dia_wf_fig, use_container_width=True
+                            )
                         except Exception as e:
                             st.info(f"Wasserfall ausgelassen: {e}")
 

@@ -1207,6 +1207,7 @@ def build_Exe_Eco_Costs(
     boundaries,
     internal_zero_labels=None, 
     elec_price_cent_kWh,
+    b1_cost_eur_per_GJ=0.0,
     Z_by_component_label,
     set_product_and_loss_to_zero=True
 ):
@@ -1222,7 +1223,8 @@ def build_Exe_Eco_Costs(
 
     - Assign component Z as "<ComponentName>_Z"
     - Assign connection prices as "<label>_c"
-    - Only fuel inputs get electricity price (€/GJ).
+    - E0 gets the electricity price (€/GJ).
+    - B1 can optionally get a user-defined specific cost (€/GJ).
     - By default product + loss streams get 0.
     """
     fuel = boundaries.get("fuel", {}) or {}
@@ -1274,7 +1276,9 @@ def build_Exe_Eco_Costs(
     for lbl in (fuel.get("inputs") or []):
         if lbl in ean_conns:
             Exe_Eco_Costs[f"{lbl}_c"] = (
-                elec_price_eur_per_GJ if lbl == "E0" else 0.0
+                elec_price_eur_per_GJ if lbl == "E0"
+                else float(b1_cost_eur_per_GJ) if lbl == "B1"
+                else 0.0
             )
 
     # NEW: internal non-material legs explicitly set to zero price
@@ -1575,6 +1579,7 @@ def run_exergoeconomic_from_hp(
         boundaries=boundaries_detected,   # ✅ USE DETECTED
         internal_zero_labels=internal_zero,
         elec_price_cent_kWh=float(elec_price_cent_kWh),
+        b1_cost_eur_per_GJ=float(costcalcparams.get("b1_cost_eur_per_GJ", 0.0)),
         Z_by_component_label=Z,
         set_product_and_loss_to_zero=True
     )
