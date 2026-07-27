@@ -13,10 +13,13 @@ class EconParams:
     # Electricity price & operating hours
     electricity_price_cent_per_kWh: float = 40.0  # cent/kWh
     tau_h_per_year: float = 5500.0               # full-load hours per year
+    analysis_year: int = 2025
 
     # Financials
     i_eff: float = 0.08   # effective interest rate
     r_n: float = 0.02     # cost escalation
+    r_n_om: float = 0.02  # O&M/general inflation for repo-like method
+    r_n_el: float = 0.02  # electricity escalation for repo-like method
     n_years: int = 20     # lifetime in years
 
     # O&M
@@ -24,6 +27,9 @@ class EconParams:
 
     # Scale PEC → TCI
     pec_to_tci_factor: float = 6.32
+    install_factor: float = 4.16
+    cost_method: str = "standard"
+    include_pumps_in_pec: bool = True
 
     # HEX U-values / costing parameters (W/m²K)
     k_evap: float = 1500.0

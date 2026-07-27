@@ -28,12 +28,14 @@ class HeatPumpCascade(HeatPumpCascadeBase):
         # Heat source
         self.comps['hs_ff'] = Source('Heat Source Feed Flow')
         self.comps['hs_bf'] = Sink('Heat Source Back Flow')
-        self.comps['hs_pump'] = Pump('Heat Source Recirculation Pump')
+        if self.get_use_source_pump():
+            self.comps['hs_pump'] = Pump('Heat Source Recirculation Pump')
 
         # Heat sink
         self.comps['hsink_ff'] = Source('Heat Sink Feed Flow')
         self.comps['hsink_bf'] = Sink('Heat Sink Back Flow')
-        self.comps['hsink_pump'] = Pump('Heat Sink Recirculation Pump')
+        if self.get_use_sink_pump():
+            self.comps['hsink_pump'] = Pump('Heat Sink Recirculation Pump')
 
         # Main cycle
         self.comps['cond'] = Condenser('Condenser')
@@ -48,6 +50,9 @@ class HeatPumpCascade(HeatPumpCascadeBase):
 
     def generate_connections(self):
         """Initialize and add connections and buses to network."""
+        use_source_pump = self.get_use_source_pump()
+        use_sink_pump = self.get_use_sink_pump()
+
         # Connections
         self.conns['A0'] = Connection(
             self.comps['cond'], 'out1', self.comps['cc2'], 'in1', 'A0'
@@ -84,26 +89,37 @@ class HeatPumpCascade(HeatPumpCascadeBase):
         self.conns['B1'] = Connection(
             self.comps['hs_ff'], 'out1', self.comps['evap'], 'in1', 'B1'
             )
-        self.conns['B2'] = Connection(
-            self.comps['evap'], 'out1', self.comps['hs_pump'], 'in1', 'B2'
-            )
-        self.conns['B3'] = Connection(
-            self.comps['hs_pump'], 'out1', self.comps['hs_bf'], 'in1', 'B3'
-            )
+        if use_source_pump:
+            self.conns['B2'] = Connection(
+                self.comps['evap'], 'out1', self.comps['hs_pump'], 'in1', 'B2'
+                )
+            self.conns['B3'] = Connection(
+                self.comps['hs_pump'], 'out1', self.comps['hs_bf'], 'in1', 'B3'
+                )
+        else:
+            self.conns['B2'] = Connection(
+                self.comps['evap'], 'out1', self.comps['hs_bf'], 'in1', 'B2'
+                )
 
         self.conns['C1'] = Connection(
             self.comps['hsink_ff'], 'out1', self.comps['cond'], 'in2', 'C1'
             )
-        self.conns['C2'] = Connection(
-            self.comps['cond'], 'out2', self.comps['hsink_pump'], 'in1', 'C2'
-            )
-        self.conns['C3'] = Connection(
-            self.comps['hsink_pump'], 'out1', self.comps['hsink_bf'], 'in1', 'C3'
-            )
+        if use_sink_pump:
+            self.conns['C2'] = Connection(
+                self.comps['cond'], 'out2', self.comps['hsink_pump'], 'in1', 'C2'
+                )
+            self.conns['C3'] = Connection(
+                self.comps['hsink_pump'], 'out1', self.comps['hsink_bf'], 'in1', 'C3'
+                )
+        else:
+            self.conns['C2'] = Connection(
+                self.comps['cond'], 'out2', self.comps['hsink_bf'], 'in1', 'C2'
+                )
 
         
 
         # Buses
+        motor_eta = self.get_motor_efficiency()
         mot_x = np.array([
             0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55,
             0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1, 1.05, 1.1, 1.15,
@@ -114,15 +130,20 @@ class HeatPumpCascade(HeatPumpCascadeBase):
             0.9318, 0.9443, 0.9546, 0.9638, 0.9724, 0.9806, 0.9878, 0.9938,
             0.9982, 1.0009, 1.002, 1.0015, 1, 0.9977, 0.9947, 0.9909, 0.9853,
             0.9644
-            ]) * 0.98)
+            ]) * motor_eta)
         mot = CharLine(x=mot_x, y=mot_y)
-         # Create power components
+        # Create power components
         self.comps['power_source'] = PowerSource('Power Input')
-        self.comps['power_bus'] = PowerBus('Power Distribution', num_in=1, num_out=4)
+        power_outs = 2 + int(use_source_pump) + int(use_sink_pump)
+        self.comps['power_bus'] = PowerBus(
+            'Power Distribution', num_in=1, num_out=power_outs
+        )
         self.comps['motor_LT'] = Motor('LT_comp motor')
         self.comps['motor_HT'] = Motor('HT_comp motor')
-        self.comps['motor_hs'] = Motor('HS_pump motor')
-        self.comps['motor_cons'] = Motor('Cons_pump motor')
+        if use_source_pump:
+            self.comps['motor_hs'] = Motor('HS_pump motor')
+        if use_sink_pump:
+            self.comps['motor_cons'] = Motor('Cons_pump motor')
         # Power connections
         self.conns['E0'] = PowerConnection(self.comps['power_source'], 'power', self.comps['power_bus'], 'power_in1', label='E0')
 
@@ -132,20 +153,40 @@ class HeatPumpCascade(HeatPumpCascadeBase):
         self.conns['E2'] = PowerConnection(self.comps['power_bus'], 'power_out2', self.comps['motor_HT'], 'power_in', label='E2')
         self.conns['e2'] = PowerConnection(self.comps['motor_HT'], 'power_out', self.comps['HT_comp'], 'power', label='e2')
 
-        self.conns['E3'] = PowerConnection(self.comps['power_bus'], 'power_out3', self.comps['motor_hs'], 'power_in', label='E3')
-        self.conns['e3'] = PowerConnection(self.comps['motor_hs'], 'power_out', self.comps['hs_pump'], 'power', label='e3')
+        next_out = 3
+        if use_source_pump:
+            self.conns['E3'] = PowerConnection(
+                self.comps['power_bus'], f'power_out{next_out}',
+                self.comps['motor_hs'], 'power_in', label='E3'
+            )
+            self.conns['e3'] = PowerConnection(
+                self.comps['motor_hs'], 'power_out', self.comps['hs_pump'],
+                'power', label='e3'
+            )
+            next_out += 1
 
-        self.conns['E4'] = PowerConnection(self.comps['power_bus'], 'power_out4', self.comps['motor_cons'], 'power_in', label='E4')
-        self.conns['e4'] = PowerConnection(self.comps['motor_cons'], 'power_out', self.comps['hsink_pump'], 'power', label='e4')
+        if use_sink_pump:
+            self.conns['E4'] = PowerConnection(
+                self.comps['power_bus'], f'power_out{next_out}',
+                self.comps['motor_cons'], 'power_in', label='E4'
+            )
+            self.conns['e4'] = PowerConnection(
+                self.comps['motor_cons'], 'power_out', self.comps['hsink_pump'],
+                'power', label='e4'
+            )
         # Add all connections to network
         self.nw.add_conns(*[conn for conn in self.conns.values()])
         # Set motor efficiency attributes
         for motor_label in ['motor_LT', 'motor_HT', 'motor_hs', 'motor_cons']:
-            self.comps[motor_label].set_attr(eta=0.98, eta_char=mot)
+            if motor_label in self.comps:
+                self.comps[motor_label].set_attr(eta=motor_eta, eta_char=mot)
 
 
     def init_simulation(self, **kwargs):
         """Perform initial parametrization with starting values."""
+        source_mode = self.get_source_mode()
+        sink_mode = self.get_sink_mode()
+
         # Components
         self.conns['A4'].set_attr(
             h=Ref(self.conns['A3'], self._init_vals['dh_rel_comp'], 0)
@@ -153,9 +194,10 @@ class HeatPumpCascade(HeatPumpCascadeBase):
         self.conns['D4'].set_attr(
             h=Ref(self.conns['D3'], self._init_vals['dh_rel_comp'], 0)
             )
-        self.comps['hs_pump'].set_attr(eta_s=self.params['hs_pump']['eta_s'])
+        if 'hs_pump' in self.comps:
+            self.comps['hs_pump'].set_attr(eta_s=self.params['hs_pump']['eta_s'])
         hsink_params = self.params.get('hsink_pump', self.params.get('cons_pump', {}))
-        if 'eta_s' in hsink_params:
+        if 'hsink_pump' in self.comps and 'eta_s' in hsink_params:
             self.comps['hsink_pump'].set_attr(eta_s=hsink_params['eta_s'])
 
         self.comps['evap'].set_attr(
@@ -168,12 +210,13 @@ class HeatPumpCascade(HeatPumpCascadeBase):
             pr1=self.params['cond']['pr1'], pr2=self.params['cond']['pr2']
             )
         # Connections
-        t_cond = self.params.get('C2', {}).get('T', self.params['C3']['T'])
-        self.T_mid = (self.params['B2']['T'] + t_cond) / 2
+        t_cond = self.get_sink_hot_design_temperature()
+        t_source_cold = self.get_source_cold_design_temperature()
+        self.T_mid = self.get_design_t_mid(t_source_cold, t_cond)
 
         # Starting values
         p_evap1, p_cond1, p_evap2, p_cond2 = self.get_pressure_levels(
-            T_evap=self.params['B2']['T'], T_mid=self.T_mid,
+            T_evap=t_source_cold, T_mid=self.T_mid,
             T_cond=t_cond
             )
         self.p_evap2 = p_evap2
@@ -185,36 +228,62 @@ class HeatPumpCascade(HeatPumpCascadeBase):
         self.conns['D3'].set_attr(x=self.params['D3']['x'], p=p_evap1)
         self.conns['D0'].set_attr(p=p_cond1, fluid={self.wf1: 1})
         # Heat source
+        m_source = self.params['B1'].get('m', None)
+        if source_mode == 'fixed_mass_flow':
+            m_source = self.get_source_mass_flow()
+            if m_source is None:
+                raise ValueError(
+                    "source_mode='fixed_mass_flow' requires setup.m_source "
+                    + "or B1.m."
+                )
         self.conns['B1'].set_attr(
             T=self.params['B1']['T'], p=self.params['B1']['p'],
-            m=self.params['B1'].get('m', None),
+            m=m_source,
             fluid={self.so: 1}
             )
-        self.conns['B2'].set_attr(T=self.params['B2']['T'])
-        self.conns['B3'].set_attr(p=self.params['B1']['p'])
+        if source_mode == 'fixed_delta_T':
+            self.conns['B2'].set_attr(T=t_source_cold)
+        if 'B3' in self.conns:
+            self.conns['B3'].set_attr(p=self.params['B1']['p'])
 
         # Heat sink
-        c1_p = self.params['C1'].get('p', self.params.get('C3', {}).get('p', None))
-        self.conns['C1'].set_attr(
-            T=self.params['C1']['T'],
-            p=c1_p,
-            fluid={self.si: 1}
+        if sink_mode == 'steam':
+            if self.get_use_sink_pump():
+                raise ValueError(
+                    "sink_mode='steam' is only supported without a sink pump."
+                )
+            m_steam = self.get_steam_mass_flow()
+            if m_steam is None:
+                raise ValueError(
+                    "sink_mode='steam' requires setup.m_steam or C1.m."
+                )
+            c1_p = self.get_sink_pressure_bar()
+            self.conns['C1'].set_attr(
+                p=c1_p, x=0, m=m_steam, fluid={self.si: 1}
             )
-        self.conns['C2'].set_attr(T=t_cond)
-        c3_p = self.params.get('C3', {}).get('p', c1_p)
-        if c3_p is not None:
-            self.conns['C3'].set_attr(p=c3_p)
-        c1_m = self.params['C1'].get('m', None)
-        if c1_m is None:
-            cons = self.params.get('cons', {})
-            q_cons = cons.get('Q')
-            t_c1 = self.params['C1']['T']
-            t_c2 = t_cond
-            if q_cons is not None and t_c2 != t_c1:
-                cp_w = 4180.0
-                c1_m = abs(float(q_cons)) / (cp_w * abs(t_c2 - t_c1))
-        if c1_m is not None:
-            self.conns['C1'].set_attr(m=c1_m)
+            self.conns['C2'].set_attr(x=1)
+        else:
+            c1_p = self.get_sink_pressure_bar()
+            self.conns['C1'].set_attr(
+                T=self.params['C1']['T'],
+                p=c1_p,
+                fluid={self.si: 1}
+                )
+            self.conns['C2'].set_attr(T=t_cond)
+            c3_p = self.params.get('C3', {}).get('p', c1_p)
+            if 'C3' in self.conns and c3_p is not None:
+                self.conns['C3'].set_attr(p=c3_p)
+            c1_m = self.params['C1'].get('m', None)
+            if c1_m is None:
+                cons = self.params.get('cons', {})
+                q_cons = cons.get('Q')
+                t_c1 = self.params['C1']['T']
+                t_c2 = t_cond
+                if q_cons is not None and t_c2 != t_c1:
+                    cp_w = 4180.0
+                    c1_m = abs(float(q_cons)) / (cp_w * abs(t_c2 - t_c1))
+            if c1_m is not None:
+                self.conns['C1'].set_attr(m=c1_m)
 
         # Perform initial simulation and unset starting values
         self._solve_model(**kwargs)
@@ -325,3 +394,4 @@ class HeatPumpCascade(HeatPumpCascadeBase):
         """Perform all necessary checks to protect consistency of parameters."""
         super().check_consistency()
         self.check_mid_temperature(wf=self.wf1)
+        self.check_cascade_operating_limits()

@@ -223,13 +223,15 @@ class HeatPumpPCTrans(HeatPumpBase):
         self.p_evap = p_evap
 
         # Main cycle
-        self.conns['A5'].set_attr(x=self.params['A5']['x'], p=p_evap)
+        self.set_suction_starting_values(
+            'A5', p_evap, x=self.params['A5']['x']
+        )
         self.conns['A0'].set_attr(
             p=self.params['A0']['p'], h=h_trans_out, fluid={self.wf: 1}
             )
         self.conns['A8'].set_attr(p=p_mid)
         if self.econ_type.lower() == 'closed':
-            self.conns['A8'].set_attr(x=1)
+            self.set_injection_starting_values(p_mid)
             self.conns['A2'].set_attr(
                 m=Ref(self.conns['A0'], 0.9, 0)
                 )
@@ -282,6 +284,9 @@ class HeatPumpPCTrans(HeatPumpBase):
         self.comps['trans'].set_attr(ttd_l=self.params['trans']['ttd_l'])
         if self.econ_type == 'closed':
             self.comps['econ'].set_attr(ttd_l=self.params['econ']['ttd_l'])
+            self.apply_design_injection_superheat()
+        if self.get_suction_superheat() > 0:
+            self.apply_design_superheat('A5')
 
         self._solve_model(**kwargs)
 
@@ -311,7 +316,7 @@ class HeatPumpPCTrans(HeatPumpBase):
             'T', t_sink_hot + self.params['trans']['ttd_l'] + 273.15,
             wf
         ) * 1e-3
-        p_mid = np.sqrt(p_evap * self.params['A0']['p'])
+        p_mid = self.get_mid_pressure(p_evap, self.params['A0']['p'])
 
         return p_evap, h_trans_out, p_mid
     def get_plotting_states(self, **kwargs):

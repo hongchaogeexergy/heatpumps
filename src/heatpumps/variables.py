@@ -1,4 +1,5 @@
 from heatpumps.models import (HeatPumpCascade, HeatPumpCascade2IHX,
+                    HeatPumpCascadeMBHX,
                     HeatPumpCascade2IHXTrans, HeatPumpCascadeTrans,
                     HeatPumpEcon, HeatPumpEconIHX, HeatPumpEconIHXTrans,
                     HeatPumpEconTrans, HeatPumpFlash, HeatPumpFlashTrans,
@@ -362,6 +363,15 @@ hp_models = {
         'nr_refrigs': 2,
         'process_type': 'subcritical'
         },
+    'cascade_mbhx': {
+        'base_topology': 'Kaskadierter Kreis',
+        'display_name': 'Allgemein | MBHX (experimentell)',
+        'nr_ihx': 0,
+        'econ_type': None,
+        'comp_var': None,
+        'nr_refrigs': 2,
+        'process_type': 'subcritical'
+        },
     'cascade_trans': {
         'base_topology': 'Kaskadierter Kreis',
         'display_name': 'Allgemein | Transkritisch',
@@ -717,6 +727,7 @@ hp_model_classes = {
     'flash': HeatPumpFlash,
     'flash_trans': HeatPumpFlashTrans,
     'cascade': HeatPumpCascade,
+    'cascade_mbhx': HeatPumpCascadeMBHX,
     'cascade_trans': HeatPumpCascadeTrans,
     'cascade_2ihx': HeatPumpCascade2IHX,
     'cascade_2ihx_trans': HeatPumpCascade2IHXTrans,

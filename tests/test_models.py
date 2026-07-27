@@ -1,7 +1,9 @@
 
 import pytest
 
+from heatpumps.economics.exerpy_costing import build_costs
 from heatpumps.models import (HeatPumpCascade, HeatPumpCascade2IHX,
+                              HeatPumpCascadeMBHX,
                               HeatPumpCascade2IHXTrans, HeatPumpCascadeEcon,
                               HeatPumpCascadeEconIHX,
                               HeatPumpCascadeEconIHXTrans,
@@ -27,6 +29,39 @@ from heatpumps.models import (HeatPumpCascade, HeatPumpCascade2IHX,
 from heatpumps.parameters import get_params
 
 
+def _configure_hthp_like_cascade_params(model_name):
+    """Return cascade params for the general HTHP-style boundary modes."""
+    params = get_params(model_name)
+    params['setup'].update({
+        'source_mode': 'fixed_mass_flow',
+        'sink_mode': 'steam',
+        'cascade_split_mode': 'lift_share',
+        'lift_share': 0.4,
+        'source_delta_T': 10.0,
+        'm_source': 15.0,
+        'T_steam': 110.0,
+        'm_steam': 0.5,
+        'use_source_pump': False,
+        'use_sink_pump': False,
+        'motor_eta': 0.95,
+        'skip_ommen_check': False,
+        'refrig1': 'R290',
+        'refrig2': 'R600',
+    })
+    params['fluids']['wf1'] = 'R290'
+    params['fluids']['wf2'] = 'R600'
+    params['B1']['T'] = 40.0
+    params['B1']['p'] = 3.0
+    params['B2']['T'] = 30.0
+    params['C1']['T'] = 110.0
+    params['inter']['ttd_u'] = 5.0
+    params['evap']['ttd_l'] = 5.0
+    params['cond']['ttd_u'] = 5.0
+    params['LT_comp']['eta_s'] = 0.80
+    params['HT_comp']['eta_s'] = 0.80
+    return params
+
+
 class TestHeatPumpCascade:
 
     @pytest.fixture
@@ -36,6 +71,44 @@ class TestHeatPumpCascade:
 
     def test_run_model(self, hp_model):
         hp_model.run_model()
+
+    def test_general_hthp_modes_configure_connections_and_split(self):
+        params = _configure_hthp_like_cascade_params('HeatPumpCascade')
+        hp = HeatPumpCascade(params=params)
+
+        hp.generate_components()
+        hp.generate_connections()
+
+        assert 'hs_pump' not in hp.comps
+        assert 'hsink_pump' not in hp.comps
+        assert 'B3' not in hp.conns
+        assert 'C3' not in hp.conns
+        assert hp.get_source_cold_design_temperature() == pytest.approx(30.0)
+        assert hp.get_sink_hot_design_temperature() == pytest.approx(110.0)
+        assert hp.supports_partload_boundary_modes() is False
+
+        t_mid = hp.get_design_t_mid(30.0, 110.0)
+        assert t_mid == pytest.approx(70.5)
+        assert hp.params['setup']['T34'] == pytest.approx(68.0)
+        assert hp.params['setup']['t_mid_fraction'] == pytest.approx(0.50625)
+
+
+def test_build_costs_handles_zero_interest_without_crashing():
+    class DummyHP:
+        comps = {}
+
+    PEC, TCI, Z = build_costs(
+        None,
+        DummyHP(),
+        i_eff=0.0,
+        r_n=0.0,
+        n=20,
+        tau_h_per_year=7500.0,
+    )
+
+    assert PEC == {}
+    assert TCI == {}
+    assert Z == {}
 
 
 class TestHeatPumpCascade2IHX:
@@ -47,6 +120,61 @@ class TestHeatPumpCascade2IHX:
 
     def test_run_model(self, hp_model):
         hp_model.run_model()
+
+    def test_general_hthp_modes_configure_connections_and_split(self):
+        params = _configure_hthp_like_cascade_params('HeatPumpCascade2IHX')
+        hp = HeatPumpCascade2IHX(params=params)
+
+        hp.generate_components()
+        hp.generate_connections()
+
+        assert 'hs_pump' not in hp.comps
+        assert 'hsink_pump' not in hp.comps
+        assert 'B3' not in hp.conns
+        assert 'C3' not in hp.conns
+        assert hp.get_source_cold_design_temperature() == pytest.approx(30.0)
+        assert hp.get_sink_hot_design_temperature() == pytest.approx(110.0)
+        assert hp.supports_partload_boundary_modes() is False
+
+        t_mid = hp.get_design_t_mid(30.0, 110.0)
+        assert t_mid == pytest.approx(70.5)
+        assert hp.params['setup']['T34'] == pytest.approx(68.0)
+        assert hp.params['setup']['t_mid_fraction'] == pytest.approx(0.50625)
+
+
+class TestHeatPumpCascadeMBHX:
+
+    @pytest.fixture
+    def hp_model(self):
+        self.params = get_params('HeatPumpCascadeMBHX')
+        return HeatPumpCascadeMBHX(params=self.params)
+
+    def test_generate_components_uses_moving_boundary_interstage_hx(self, hp_model):
+        hp_model.generate_components()
+
+        assert hp_model.comps['inter'].__class__.__name__ == (
+            'MovingBoundaryHeatExchanger'
+        )
+
+    def test_general_hthp_modes_configure_connections_and_split(self):
+        params = _configure_hthp_like_cascade_params('HeatPumpCascadeMBHX')
+        hp = HeatPumpCascadeMBHX(params=params)
+
+        hp.generate_components()
+        hp.generate_connections()
+
+        assert 'hs_pump' not in hp.comps
+        assert 'hsink_pump' not in hp.comps
+        assert 'B3' not in hp.conns
+        assert 'C3' not in hp.conns
+        assert hp.get_source_cold_design_temperature() == pytest.approx(30.0)
+        assert hp.get_sink_hot_design_temperature() == pytest.approx(110.0)
+        assert hp.supports_partload_boundary_modes() is False
+
+        t_mid = hp.get_design_t_mid(30.0, 110.0)
+        assert t_mid == pytest.approx(70.5)
+        assert hp.params['setup']['T34'] == pytest.approx(68.0)
+        assert hp.params['setup']['t_mid_fraction'] == pytest.approx(0.50625)
 
 
 class TestHeatPumpCascade2IHXTrans:

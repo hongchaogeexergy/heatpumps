@@ -2,14 +2,14 @@
     "setup": {
         "name": "closed economizer",
         "type": "HeatPumpEconClosedTrans",
-        "refrig": "R717"
+        "refrig": "R1234yf"
     },
     "ambient": {
         "p": 1,
         "T": 25
     },
     "fluids": {
-        "wf": "R717",
+        "wf": "R1234yf",
         "si": "H2O",
         "so": "H2O"
     },
@@ -59,26 +59,26 @@
         "eta_s": 0.8
     },
     "A0": {
-        "p": 120
+        "p": 45
     },
     "A5": {
         "x": 1
     },
     "B1": {
-        "T": 10,
+        "T": 60,
         "p": 1.013
     },
     "B2": {
-        "T": 5
+        "T": 30
     },
     "C1": {
-        "T": 80
+        "T": 70
     },
     "C2": {
-        "T": 90
+        "T": 110
     },
     "C3": {
-        "T": 90,
+        "T": 110,
         "p": 10
     },
     "offdesign": {

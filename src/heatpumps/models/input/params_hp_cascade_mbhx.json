@@ -1,0 +1,106 @@
+{
+    "setup": {
+        "name": "two stage cascade moving-boundary interstage HX",
+        "type": "HeatPumpCascadeMBHX",
+        "refrig1": "R717",
+        "refrig2": "R245fa",
+        "source_mode": "fixed_delta_T",
+        "sink_mode": "sensible",
+        "cascade_split_mode": "t_mid",
+        "lift_share": 0.5,
+        "source_delta_T": 5.0,
+        "m_source": 15.0,
+        "T_steam": 110.0,
+        "m_steam": 0.5,
+        "use_source_pump": true,
+        "use_sink_pump": true,
+        "motor_eta": 0.98,
+        "skip_ommen_check": false
+    },
+    "ambient": {
+        "p": 1,
+        "T": 25
+    },
+    "fluids": {
+        "wf1": "NH3",
+        "wf2": "R245fa",
+        "si": "H2O",
+        "so": "H2O"
+    },
+    "logph": {
+        "x_min": 250,
+        "x_max": 2250,
+        "y_min": 1e0,
+        "y_max": 3e2
+    },
+    "cond" : {
+        "pr1": 0.98,
+        "pr2": 0.98,
+        "ttd_u": 2
+    },
+    "evap": {
+        "pr1": 0.98,
+        "pr2": 0.98,
+        "ttd_l": 2
+    },
+    "inter": {
+        "pr1": 1.0,
+        "pr2": 1.0,
+        "ttd_u": 2
+    },
+    "cons" : {
+        "pr": 0.98,
+        "Q": -10e6
+    },
+    "LT_comp": {
+        "eta_s": 0.75
+    },
+    "HT_comp": {
+        "eta_s": 0.75
+    },
+    "hs_pump": {
+        "eta_s": 0.8
+    },
+    "cons_pump": {
+        "eta_s": 0.8
+    },
+    "hsink_pump": {
+        "eta_s": 0.8
+    },
+    "A3": {
+        "x": 1
+    },
+    "D3": {
+        "x": 1
+    },
+    "B1": {
+        "T": 10,
+        "p": 1.013
+    },
+    "B2": {
+        "T": 5
+    },
+    "C1": {
+        "T": 50,
+        "p": 10
+    },
+    "C2": {
+        "T": 90
+    },
+    "C3": {
+        "T": 90,
+        "p": 10
+    },
+    "offdesign": {
+        "T_hs_ff_start": 10,
+        "T_hs_ff_end": 10,
+        "T_hs_ff_steps": 1,
+        "T_cons_ff_start": 70,
+        "T_cons_ff_end": 124,
+        "T_cons_ff_steps": 10,
+        "partload_min": 0.5,
+        "partload_max": 1.0,
+        "partload_steps": 6,
+        "save_results": true
+    }
+}

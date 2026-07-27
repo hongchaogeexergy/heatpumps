@@ -8,6 +8,8 @@ __pycache__/
 # Python tooling caches
 .pytest_cache/
 .mypy_cache/
+.cache/
+.mplconfig/
 
 # Virtual environments
 .venv/
@@ -27,4 +29,8 @@ dist/
 *.tmp
 
 # Generated local output files
+output/
 logph_*.pdf
+
+# Local analysis/export scripts
+scripts/

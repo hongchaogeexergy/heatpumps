@@ -33,6 +33,7 @@ COMP_SHAPES = {
     "Pump": "circle",
     "Condenser": "box",
     "HeatExchanger": "box",
+    "MovingBoundaryHeatExchanger": "box",
     "SimpleHeatExchanger": "box",
     "Valve": "triangle",
     "CycleCloser": "point",

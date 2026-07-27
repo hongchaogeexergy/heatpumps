@@ -1,6 +1,8 @@
 import base64
 import json
 import os
+from copy import deepcopy
+from xml.sax.saxutils import escape
 
 import darkdetect
 import matplotlib.pyplot as plt
@@ -118,6 +120,11 @@ PEC_FLASH_OPTIONS = {
     },
 }
 
+COST_METHOD_OPTIONS = {
+    "standard": "Dashboard-Standard",
+    "repo_hthp": "Tomasinelli et al. (2026)",
+}
+
 
 def _selected_pec_summary(costcalcparams, CEPCI_cur):
     usd_to_eur = float(costcalcparams.get('usd_to_eur', 0.93))
@@ -173,6 +180,107 @@ def _selected_pec_summary(costcalcparams, CEPCI_cur):
     return pd.DataFrame(rows)
 
 
+def build_kosmadakis_project_cost_df(hp, PEC, kosmadakis_params, elec_price_cent_kWh, tau_h_per_year):
+    """Estimate project cost and savings using the Kosmadakis dashboard assumptions."""
+    comp_by_label = {
+        getattr(comp, "label", ""): comp
+        for comp in getattr(hp, "comps", {}).values()
+    }
+
+    def _component_class(label):
+        comp = comp_by_label.get(label)
+        return comp.__class__.__name__ if comp is not None else ""
+
+    def _is_hex_label(label):
+        cls = _component_class(label)
+        label_l = str(label).lower()
+        return (
+            cls in {"Condenser", "HeatExchanger", "SimpleHeatExchanger", "DropletSeparator"}
+            or any(token in label_l for token in ("evaporator", "condenser", "heat exchanger", "economizer"))
+        )
+
+    def _is_comp_label(label):
+        return _component_class(label) == "Compressor"
+
+    def _is_flash_label(label):
+        cls = _component_class(label)
+        return cls == "Drum" or "flash" in str(label).lower()
+
+    def _safe_float(value, default=0.0):
+        try:
+            value = float(value)
+        except Exception:
+            return default
+        return value if np.isfinite(value) else default
+
+    pec_hex_sum = float(sum(val for lbl, val in PEC.items() if _is_hex_label(lbl)))
+    pec_comp_sum = float(sum(val for lbl, val in PEC.items() if _is_comp_label(lbl)))
+    pec_flash_sum = float(sum(val for lbl, val in PEC.items() if _is_flash_label(lbl)))
+    base_equipment_cost = pec_hex_sum + pec_comp_sum + pec_flash_sum
+
+    refrigerant_charge_kg = max(_safe_float(kosmadakis_params.get('refrigerant_charge_kg', 0.0)), 0.0)
+    refrigerant_price_eur_kg = max(_safe_float(kosmadakis_params.get('refrigerant_price_eur_kg', 50.0), 50.0), 0.0)
+    gas_price_cent_kWh = max(_safe_float(kosmadakis_params.get('gas_price_cent_kWh', 8.0), 8.0), 0.0)
+    gas_boiler_efficiency = max(_safe_float(kosmadakis_params.get('gas_boiler_efficiency', 0.90), 0.90), 1e-9)
+    piping_factor = max(_safe_float(kosmadakis_params.get('kos_piping_factor', 0.10), 0.10), 0.0)
+    electrical_factor = max(_safe_float(kosmadakis_params.get('kos_electrical_factor', 0.10), 0.10), 0.0)
+    project_factor = max(_safe_float(kosmadakis_params.get('kos_project_factor', 4.16), 4.16), 0.0)
+    om_factor = max(_safe_float(kosmadakis_params.get('kos_om_factor', 0.02), 0.02), 0.0)
+    discount_rate = max(_safe_float(kosmadakis_params.get('kos_discount_rate', 0.05), 0.05), 0.0)
+
+    C_p_t = piping_factor * base_equipment_cost
+    C_el_CI = electrical_factor * base_equipment_cost
+    C_refrigerant = refrigerant_price_eur_kg * refrigerant_charge_kg
+    C_total_kos = base_equipment_cost + C_refrigerant + C_p_t + C_el_CI
+    C_project = project_factor * C_total_kos
+
+    try:
+        Q_out_W = getattr(hp, 'Q_out', None)
+        if Q_out_W is None or (isinstance(Q_out_W, float) and np.isnan(Q_out_W)):
+            if hasattr(hp, '_get_heat_output_W'):
+                Q_out_W = hp._get_heat_output_W()
+            else:
+                Q_out_W = hp.comps['cons'].Q.val
+        annual_heat_kWh = abs(float(Q_out_W)) / 1e3 * float(tau_h_per_year)
+    except Exception:
+        annual_heat_kWh = 0.0
+
+    try:
+        annual_el_kWh = abs(float(hp.conns['E0'].E.val)) / 1e3 * float(tau_h_per_year)
+    except Exception:
+        annual_el_kWh = 0.0
+
+    C_g = annual_heat_kWh * gas_price_cent_kWh / 100.0 / gas_boiler_efficiency
+    C_el_OP = annual_el_kWh * float(elec_price_cent_kWh) / 100.0
+    C_O_and_M_project = om_factor * C_project
+    E_s = C_g - C_el_OP - C_O_and_M_project
+
+    if discount_rate <= 0.0:
+        PBP = C_project / E_s if E_s > 0.0 else np.nan
+    elif E_s > C_project and (1.0 - C_project / E_s) > 0.0:
+        PBP = np.log(1.0 / (1.0 - C_project / E_s)) / np.log(1.0 + discount_rate)
+    else:
+        PBP = np.nan
+
+    return pd.DataFrame([
+        {"Größe": "Σ PEC_HEX", "Wert": pec_hex_sum, "Einheit": "EUR"},
+        {"Größe": "Σ PEC_compressor", "Wert": pec_comp_sum, "Einheit": "EUR"},
+        {"Größe": "PEC_flashtank", "Wert": pec_flash_sum, "Einheit": "EUR"},
+        {"Größe": "C_p-t", "Wert": C_p_t, "Einheit": "EUR"},
+        {"Größe": "C_el^CI", "Wert": C_el_CI, "Einheit": "EUR"},
+        {"Größe": "C_refrigerant", "Wert": C_refrigerant, "Einheit": "EUR"},
+        {"Größe": "C_gesamt", "Wert": C_total_kos, "Einheit": "EUR"},
+        {"Größe": "C_project", "Wert": C_project, "Einheit": "EUR"},
+        {"Größe": "Q_Nutz", "Wert": annual_heat_kWh, "Einheit": "kWh/a"},
+        {"Größe": "W_el", "Wert": annual_el_kWh, "Einheit": "kWh/a"},
+        {"Größe": "C_g", "Wert": C_g, "Einheit": "EUR/a"},
+        {"Größe": "C_el^OP", "Wert": C_el_OP, "Einheit": "EUR/a"},
+        {"Größe": "C_O&M", "Wert": C_O_and_M_project, "Einheit": "EUR/a"},
+        {"Größe": "E_s", "Wert": E_s, "Einheit": "EUR/a"},
+        {"Größe": "PBP", "Wert": PBP, "Einheit": "a"},
+    ])
+
+
 def switch2design():
     """Switch to design simulation tab."""
     ss.select = 'Auslegung'
@@ -202,6 +310,54 @@ def st_safe_df(df: pd.DataFrame) -> pd.DataFrame:
             d[c] = d[c].astype(str)
 
     return d
+
+
+def _excel_xml_sheet_name(name: str) -> str:
+    cleaned = "".join(ch for ch in str(name) if ch not in r'[]:*?/\\')
+    return cleaned[:31] or "Sheet"
+
+
+def _excel_xml_cell(value) -> str:
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return '<Cell/>'
+    if isinstance(value, (np.integer, int)):
+        return f'<Cell><Data ss:Type="Number">{int(value)}</Data></Cell>'
+    if isinstance(value, (np.floating, float)) and np.isfinite(value):
+        return f'<Cell><Data ss:Type="Number">{float(value)}</Data></Cell>'
+    text = escape(str(value))
+    return f'<Cell><Data ss:Type="String">{text}</Data></Cell>'
+
+
+def _build_excel_xml_workbook(sheets: dict[str, pd.DataFrame]) -> bytes:
+    workbook = [
+        '<?xml version="1.0"?>',
+        '<?mso-application progid="Excel.Sheet"?>',
+        '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"',
+        ' xmlns:o="urn:schemas-microsoft-com:office:office"',
+        ' xmlns:x="urn:schemas-microsoft-com:office:excel"',
+        ' xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">',
+    ]
+
+    for raw_name, df in sheets.items():
+        sheet_name = escape(_excel_xml_sheet_name(raw_name))
+        safe_df = st_safe_df(df if isinstance(df, pd.DataFrame) else pd.DataFrame(df))
+        workbook.append(f'<Worksheet ss:Name="{sheet_name}"><Table>')
+
+        workbook.append('<Row>')
+        for col in safe_df.columns:
+            workbook.append(_excel_xml_cell(col))
+        workbook.append('</Row>')
+
+        for row in safe_df.itertuples(index=False, name=None):
+            workbook.append('<Row>')
+            for value in row:
+                workbook.append(_excel_xml_cell(value))
+            workbook.append('</Row>')
+
+        workbook.append('</Table></Worksheet>')
+
+    workbook.append('</Workbook>')
+    return "".join(workbook).encode("utf-8")
 
 
 def _hard_reset_model_state():
@@ -300,6 +456,10 @@ def _append_param_row(rows, group, label, value):
 def build_selected_params_df(params, hp_model, base_topology, model_name, process_type):
     """Create a compact overview of the user-selected inputs."""
     rows = []
+    setup = params.get('setup', {})
+    source_mode = str(setup.get('source_mode', 'fixed_delta_T'))
+    sink_mode = str(setup.get('sink_mode', 'sensible'))
+    split_mode = str(setup.get('cascade_split_mode', 't_mid'))
 
     _append_param_row(rows, 'Szenario', 'Grundtopologie', base_topology)
     _append_param_row(rows, 'Szenario', 'Modell', model_name)
@@ -326,28 +486,66 @@ def build_selected_params_df(params, hp_model, base_topology, model_name, proces
 
     source_ff = params.get('B1', {})
     source_bf = params.get('B2', {})
+    _append_param_row(rows, 'Wärmequelle', 'Modus', source_mode)
     _append_param_row(rows, 'Wärmequelle', 'Vorlauf', f"{source_ff.get('T')} °C")
-    _append_param_row(rows, 'Wärmequelle', 'Rücklauf', f"{source_bf.get('T')} °C")
+    if source_mode == 'fixed_delta_T':
+        _append_param_row(rows, 'Wärmequelle', 'Rücklauf', f"{source_bf.get('T')} °C")
+        _append_param_row(
+            rows, 'Wärmequelle', 'Delta T',
+            f"{setup.get('source_delta_T', np.nan)} K"
+        )
+    else:
+        _append_param_row(
+            rows, 'Wärmequelle', 'Startwert Rücklauf',
+            f"{source_bf.get('T')} °C"
+        )
+        _append_param_row(
+            rows, 'Wärmequelle', 'Massenstrom',
+            f"{setup.get('m_source', source_ff.get('m'))} kg/s"
+        )
     if 'p' in source_ff:
         _append_param_row(
             rows, 'Wärmequelle', 'Eintrittsdruck',
             f"{source_ff.get('p')} bar"
             )
+    _append_param_row(
+        rows, 'Wärmequelle', 'Quellenpumpe modelliert',
+        'Ja' if bool(setup.get('use_source_pump', True)) else 'Nein'
+    )
 
     sink_rf = params.get('C1', {})
     sink_ff = params.get('C3', {})
-    _append_param_row(rows, 'Wärmesenke', 'Rücklauf', f"{sink_rf.get('T')} °C")
-    if 'C2' in params:
+    _append_param_row(rows, 'Wärmesenke', 'Modus', sink_mode)
+    if sink_mode == 'steam':
         _append_param_row(
-            rows, 'Wärmesenke', 'Zwischenzustand',
-            f"{params['C2'].get('T')} °C"
-            )
-    _append_param_row(rows, 'Wärmesenke', 'Vorlauf', f"{sink_ff.get('T')} °C")
-    if 'p' in sink_ff:
+            rows, 'Wärmesenke', 'Dampftemperatur',
+            f"{setup.get('T_steam', sink_rf.get('T'))} °C"
+        )
         _append_param_row(
-            rows, 'Wärmesenke', 'Druck',
-            f"{sink_ff.get('p')} bar"
-            )
+            rows, 'Wärmesenke', 'Dampfmassenstrom',
+            f"{setup.get('m_steam', sink_rf.get('m'))} kg/s"
+        )
+        _append_param_row(
+            rows, 'Wärmesenke', 'Sattdruck',
+            f"{sink_rf.get('p', sink_ff.get('p'))} bar"
+        )
+    else:
+        _append_param_row(rows, 'Wärmesenke', 'Rücklauf', f"{sink_rf.get('T')} °C")
+        if 'C2' in params:
+            _append_param_row(
+                rows, 'Wärmesenke', 'Zwischenzustand',
+                f"{params['C2'].get('T')} °C"
+                )
+        _append_param_row(rows, 'Wärmesenke', 'Vorlauf', f"{sink_ff.get('T')} °C")
+        if 'p' in sink_ff:
+            _append_param_row(
+                rows, 'Wärmesenke', 'Druck',
+                f"{sink_ff.get('p')} bar"
+                )
+    _append_param_row(
+        rows, 'Wärmesenke', 'Senkenpumpe modelliert',
+        'Ja' if bool(setup.get('use_sink_pump', True)) else 'Nein'
+    )
 
     if 'A0' in params and 'p' in params['A0']:
         _append_param_row(
@@ -361,6 +559,76 @@ def build_selected_params_df(params, hp_model, base_topology, model_name, proces
             rows, 'Prozess', 'Heizleistung Soll',
             f"{abs(cons['Q']) / 1e6:.2f} MW"
             )
+
+    if 'global_ttd_main_hex' in setup:
+        _append_param_row(
+            rows, 'Hauptwärmeübertrager', 'Globaler Minimalabstand',
+            f"{float(setup['global_ttd_main_hex']):.1f} K"
+        )
+    if supports_explicit_suction_superheat(hp_model) and 'dT_sup' in setup:
+        _append_param_row(
+            rows, 'Kreisprozess', 'Verdichtersaugüberhitzung',
+            f"{float(setup['dT_sup']):.1f} K"
+        )
+    if supports_explicit_subcooling(hp_model) and 'dT_sub' in setup:
+        _append_param_row(
+            rows, 'Kreisprozess', 'Unterkühlung',
+            f"{float(setup['dT_sub']):.1f} K"
+        )
+    calibration_mode = str(setup.get('calibration_mode', 'rip'))
+    if (
+        supports_rip_factor(hp_model)
+        and calibration_mode != 'a_target'
+        and 'rip_factor' in setup
+    ):
+        _append_param_row(
+            rows, 'Kreisprozess', 'Zwischendruckfaktor RIP',
+            f"{float(setup['rip_factor']):.3f}"
+        )
+    if calibration_mode == 'a_target':
+        _append_param_row(
+            rows, 'Kreisprozess', 'Kalibriermodus',
+            'A_target -> RIP'
+        )
+        if 'A_target' in setup:
+            _append_param_row(
+                rows, 'Kreisprozess', 'A_target',
+                f"{float(setup['A_target']):.3f}"
+            )
+    if supports_explicit_injection_superheat(hp_model) and 'dT_sup_inj' in setup:
+        _append_param_row(
+            rows, 'Kreisprozess', 'Einspritz-Überhitzung',
+            f"{float(setup['dT_sup_inj']):.1f} K"
+        )
+    if hp_model['nr_refrigs'] == 2 and 't_mid' in setup:
+        _append_param_row(
+            rows, 'Zwischenwärmeübertrager', 'T_mid',
+            f"{float(setup['t_mid']):.2f} °C"
+        )
+    if hp_model['nr_refrigs'] == 2:
+        _append_param_row(
+            rows, 'Zwischenwärmeübertrager', 'Splitmodus', split_mode
+        )
+    if hp_model['nr_refrigs'] == 2 and 't_mid_fraction' in setup:
+        _append_param_row(
+            rows, 'Zwischenwärmeübertrager', 'Splitfaktor α',
+            f"{float(setup['t_mid_fraction']):.3f}"
+        )
+    if hp_model['nr_refrigs'] == 2 and 'lift_share' in setup:
+        _append_param_row(
+            rows, 'Zwischenwärmeübertrager', 'Lift Share',
+            f"{float(setup['lift_share']):.3f}"
+        )
+    if 'motor_eta' in setup:
+        _append_param_row(
+            rows, 'System', 'Motorwirkungsgrad',
+            f"{float(setup['motor_eta']) * 100:.1f} %"
+        )
+    if 'skip_ommen_check' in setup:
+        _append_param_row(
+            rows, 'System', 'Ommen-Check deaktiviert',
+            'Ja' if bool(setup['skip_ommen_check']) else 'Nein'
+        )
 
     for comp_key in (
         'comp', 'comp1', 'comp2',
@@ -380,6 +648,670 @@ def build_selected_params_df(params, hp_model, base_topology, model_name, proces
                 )
 
     return pd.DataFrame(rows)
+
+
+def build_literature_metrics_export_df(hp, hp_model_name):
+    """Create a one-row export table with literature-oriented KPIs."""
+    if hp is None or not hasattr(hp, 'get_literature_comparison_metrics'):
+        return pd.DataFrame()
+
+    metrics = hp.get_literature_comparison_metrics()
+    if not metrics:
+        return pd.DataFrame()
+
+    return pd.DataFrame([
+        {
+            'Kennzahl': 'A_inj',
+            'Wert': (
+                f"A_inj ≈ {float(metrics.get('A_inj', np.nan)):.3f}"
+                if np.isfinite(metrics.get('A_inj', np.nan)) else '—'
+            )
+        },
+        {
+            'Kennzahl': 'T_discharge_final',
+            'Wert': (
+                f"T_discharge_final ≈ "
+                f"{float(metrics.get('T_discharge_final_C', np.nan)):.2f} °C"
+                if np.isfinite(metrics.get('T_discharge_final_C', np.nan)) else '—'
+            )
+        },
+        {
+            'Kennzahl': 'VHC',
+            'Wert': (
+                f"VHC ≈ {float(metrics.get('VHC_MJ_m3', np.nan)):.2f} MJ/m³"
+                if np.isfinite(metrics.get('VHC_MJ_m3', np.nan)) else '—'
+            )
+        }
+    ])
+
+
+def supports_general_boundary_modes(hp_model_name):
+    """Return whether general HTHP boundary modes are exposed in the UI."""
+    return hp_model_name in {'cascade', 'cascade_mbhx', 'cascade_2ihx'}
+
+
+def _load_hthp_reference_cases():
+    """Load local literature reference cases for HTHP comparisons."""
+    ref_path = os.path.join(_get_input_param_dir(), 'hthp_reference_cases.json')
+    if not os.path.exists(ref_path):
+        return {}
+    try:
+        data = _load_input_json(ref_path)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def get_reference_case_data(params):
+    """Return literature reference metadata for the current parameter set."""
+    ref_id = str(params.get('setup', {}).get('reference_id', '')).strip()
+    if not ref_id:
+        return None
+    case = _load_hthp_reference_cases().get(ref_id)
+    return case if isinstance(case, dict) else None
+
+
+def _format_reference_value(value, unit='-', digits=2):
+    """Format a numeric value with unit for the reference comparison tables."""
+    try:
+        value = float(value)
+    except Exception:
+        return '—'
+    if not np.isfinite(value):
+        return '—'
+    if unit == '-' or not unit:
+        return f"{value:.{digits}f}"
+    return f"{value:.{digits}f} {unit}"
+
+
+def build_reference_comparison_df(hp, params):
+    """Create a literature comparison table for supported reference cases."""
+    case = get_reference_case_data(params)
+    if case is None or hp is None or not hasattr(hp, 'get_reference_case_metrics'):
+        return pd.DataFrame()
+
+    current = hp.get_reference_case_metrics() or {}
+    rows = []
+
+    for metric in case.get('metrics', []):
+        if not isinstance(metric, dict):
+            continue
+
+        key = metric.get('key')
+        label = metric.get('label', key)
+        unit = metric.get('unit', '-')
+        digits = int(metric.get('digits', 2))
+
+        try:
+            ref_value = float(metric.get('reference', np.nan))
+        except Exception:
+            ref_value = np.nan
+        try:
+            model_value = float(current.get(key, np.nan))
+        except Exception:
+            model_value = np.nan
+
+        abs_dev = np.nan
+        rel_dev_pct = np.nan
+        if np.isfinite(ref_value) and np.isfinite(model_value):
+            abs_dev = model_value - ref_value
+            if not np.isclose(ref_value, 0.0):
+                rel_dev_pct = abs_dev / ref_value * 100.0
+
+        rows.append({
+            'Kennzahl': label,
+            'Referenz': _format_reference_value(ref_value, unit=unit, digits=digits),
+            'Modell': _format_reference_value(model_value, unit=unit, digits=digits),
+            'Abweichung absolut': _format_reference_value(abs_dev, unit=unit, digits=digits),
+            'Abweichung relativ': (
+                f"{rel_dev_pct:+.{digits}f} %"
+                if np.isfinite(rel_dev_pct) else '—'
+            ),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def build_reference_internal_states_export_df(hp, params):
+    """Create an export table with internal thermodynamic reference metrics."""
+    case = get_reference_case_data(params)
+    if case is None or hp is None or not hasattr(hp, 'get_reference_case_metrics'):
+        return pd.DataFrame()
+
+    current = hp.get_reference_case_metrics() or {}
+    metric_lookup = {}
+    for metric in case.get('metrics', []):
+        if isinstance(metric, dict) and metric.get('key'):
+            metric_lookup[str(metric['key'])] = metric
+
+    internal_metric_order = [
+        'm_cycle1_kg_s',
+        'm_cycle2_kg_s',
+        'V_dot_c1_m3_h',
+        'V_dot_c2_m3_h',
+        'p_high_c1_bar',
+        'T_disch_c1_C',
+        'p_high_c2_bar',
+        'T_disch_c2_C',
+    ]
+
+    rows = []
+    for key in internal_metric_order:
+        metric = metric_lookup.get(key)
+        if metric is None:
+            continue
+
+        label = metric.get('label', key)
+        unit = metric.get('unit', '-')
+        digits = int(metric.get('digits', 2))
+
+        try:
+            ref_value = float(metric.get('reference', np.nan))
+        except Exception:
+            ref_value = np.nan
+        try:
+            model_value = float(current.get(key, np.nan))
+        except Exception:
+            model_value = np.nan
+
+        abs_dev = np.nan
+        rel_dev_pct = np.nan
+        if np.isfinite(ref_value) and np.isfinite(model_value):
+            abs_dev = model_value - ref_value
+            if not np.isclose(ref_value, 0.0):
+                rel_dev_pct = abs_dev / ref_value * 100.0
+
+        rows.append({
+            'Kennzahl': label,
+            'Einheit': unit,
+            'Referenz': ref_value,
+            'Modell': model_value,
+            'Abweichung absolut': abs_dev,
+            'Abweichung relativ [%]': rel_dev_pct,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def build_reference_published_df(params):
+    """Create a table with published reference values not yet compared live."""
+    case = get_reference_case_data(params)
+    if case is None:
+        return pd.DataFrame()
+
+    rows = []
+    for metric in case.get('published_only_metrics', []):
+        if not isinstance(metric, dict):
+            continue
+        rows.append({
+            'Kennzahl': metric.get('label', ''),
+            'Veröffentlicht': _format_reference_value(
+                metric.get('reference', np.nan),
+                unit=metric.get('unit', '-'),
+                digits=int(metric.get('digits', 2)),
+            ),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def get_source_mode_from_params(params):
+    """Return the selected source mode from raw params."""
+    return str(params.get('setup', {}).get('source_mode', 'fixed_delta_T'))
+
+
+def get_sink_mode_from_params(params):
+    """Return the selected sink mode from raw params."""
+    return str(params.get('setup', {}).get('sink_mode', 'sensible'))
+
+
+def get_source_delta_T_from_params(params):
+    """Return the configured source-side temperature drop in K."""
+    setup = params.get('setup', {})
+    if 'source_delta_T' in setup:
+        return float(setup['source_delta_T'])
+    return float(params['B1']['T']) - float(params['B2']['T'])
+
+
+def get_source_cold_design_temp_from_params(params):
+    """Return the source outlet temperature used for cascade setup."""
+    if get_source_mode_from_params(params) == 'fixed_delta_T':
+        return float(params['B2']['T'])
+    return float(params['B1']['T']) - get_source_delta_T_from_params(params)
+
+
+def get_sink_hot_target_temp_from_params(params):
+    """Return the target hot sink temperature for the selected sink mode."""
+    if get_sink_mode_from_params(params) == 'steam':
+        return float(params.get('setup', {}).get('T_steam', params['C1']['T']))
+    return float(
+        params.get('C2', {}).get(
+            'T', params.get('C3', {}).get('T', params['C1']['T'])
+        )
+    )
+
+
+def get_cascade_t_mid_bounds(params):
+    """Return physical bounds for the cascade intermediate temperature."""
+    t_source_cold = get_source_cold_design_temp_from_params(params)
+    t_sink_hot = get_sink_hot_target_temp_from_params(params)
+    inter_ttd = float(params.get('inter', {}).get('ttd_u', 0.0))
+    t_mid_min = t_source_cold + inter_ttd / 2
+    t_mid_max = t_sink_hot - inter_ttd / 2
+    return t_source_cold, t_sink_hot, t_mid_min, t_mid_max
+
+
+def supports_explicit_suction_superheat(hp_model):
+    """Return whether a model supports a separate suction superheat input."""
+    return hp_model['nr_refrigs'] == 1 and hp_model['nr_ihx'] == 0
+
+
+def supports_explicit_subcooling(hp_model):
+    """Return whether a model supports a separate liquid subcooling input."""
+    return (
+        supports_explicit_suction_superheat(hp_model)
+        and hp_model['process_type'] == 'subcritical'
+    )
+
+
+def supports_rip_factor(hp_model):
+    """Return whether a model uses an adjustable intermediate pressure."""
+    return hp_model['nr_refrigs'] == 1 and hp_model['comp_var'] is not None
+
+
+def supports_explicit_injection_superheat(hp_model):
+    """Return whether a model supports explicit injection superheat input."""
+    return (
+        hp_model['base_topology'] == 'Economizer'
+        and hp_model['nr_refrigs'] == 1
+        and hp_model['nr_ihx'] == 0
+        and hp_model['econ_type'] == 'closed'
+    )
+
+
+def supports_a_target_calibration(hp_model_name):
+    """Return whether a model supports A-target literature calibration."""
+    return hp_model_name in {'flash', 'econ_closed'}
+
+
+def get_main_hex_ttd_targets(params):
+    """Return all main heat exchanger TTD parameters eligible for global control."""
+    targets = []
+    for comp_key, field in (
+        ('evap', 'ttd_l'),
+        ('cond', 'ttd_u'),
+        ('inter', 'ttd_u'),
+        ('trans', 'ttd_l'),
+        ('econ', 'ttd_l'),
+        ('econ1', 'ttd_l'),
+        ('econ2', 'ttd_l'),
+    ):
+        if comp_key in params and field in params[comp_key]:
+            targets.append((comp_key, field))
+    return targets
+
+
+def apply_global_main_hex_ttd(params, value):
+    """Apply one global minimum temperature difference to all main HEX targets."""
+    value = float(value)
+    for comp_key, field in get_main_hex_ttd_targets(params):
+        params[comp_key][field] = value
+    params.setdefault('setup', {})
+    params['setup']['global_ttd_main_hex'] = value
+
+
+def _get_input_param_dir():
+    """Return absolute path to the model input parameter directory."""
+    return os.path.abspath(
+        os.path.join(os.path.dirname(__file__), 'models', 'input')
+    )
+
+
+def _load_input_json(json_path):
+    """Load a JSON file from disk."""
+    with open(json_path, 'r', encoding='utf-8') as file:
+        return json.load(file)
+
+
+def _apply_dashboard_preset_defaults(params):
+    """
+    Seed dashboard-side cost and finance defaults from a loaded preset.
+
+    Values are only written if no user state exists yet, so manual edits remain
+    intact until the parameter preset is changed (which already resets widget
+    state via the model signature logic).
+    """
+    for key, value in params.get('costcalcparams', {}).items():
+        ss.setdefault(key, value)
+    for key, value in params.get('econ_params', {}).items():
+        ss.setdefault(key, value)
+
+
+def _restore_cost_finance_widget_state(params):
+    """
+    Restore sidebar cost/finance widget state from the last valid run.
+
+    Streamlit occasionally reinitializes a cluster of numeric widgets to their
+    minimum values on rerun. If that happens, recover the last valid values
+    from cached UI state or fall back to preset/default values.
+    """
+    cost_defaults = {
+        'cost_method': 'standard',
+        'current_year': '2025',
+        'analysis_year': 2025,
+        'hx_area_method': 'q_lmtd',
+        'compressor_eta_vol': 1.0,
+        'compressor_eta_vol_lt': 1.0,
+        'compressor_eta_vol_ht': 1.0,
+        'elec_price_cent_kWh': 40.0,
+        'b1_cost_eur_per_GJ': 0.0,
+        'tau_h_per_year': 5500.0,
+        'usd_to_eur': 0.93,
+        'hex_cost_model': 'ommen',
+        'compressor_cost_model': 'ommen',
+        'flash_cost_model': 'ommen',
+        'include_pumps_in_pec': True,
+        'k_evap': 1500,
+        'k_cond': 3500,
+        'k_inter': 2200,
+        'k_ihx': 1500,
+        'k_trans': 60,
+        'k_misc': 50,
+        'residence_time': 10,
+    }
+    kosmadakis_defaults = {
+        'gas_price_cent_kWh': 8.0,
+        'gas_boiler_efficiency': 0.90,
+        'refrigerant_charge_kg': 0.0,
+        'refrigerant_price_eur_kg': 50.0,
+        'kos_piping_factor': 0.10,
+        'kos_electrical_factor': 0.10,
+        'kos_project_factor': 4.16,
+        'kos_om_factor': 0.02,
+        'kos_discount_rate': 0.05,
+    }
+    econ_defaults = {
+        'i_eff': 0.08,
+        'r_n': 0.02,
+        'r_n_om': 0.02,
+        'r_n_el': 0.02,
+        'n': 20,
+        'omc_rel': 0.03,
+        'tci_factor': 6.32,
+        'install_factor': 4.16,
+    }
+
+    preset_costs = params.get('costcalcparams', {}) or {}
+    preset_econ = params.get('econ_params', {}) or {}
+    cached_costs = ss.get('costcalcparams', {}) or {}
+    cached_econ = ss.get('econ_ui_params', {}) or {}
+    cached_kosmadakis = ss.get('kosmadakis_params', {}) or {}
+
+    def _looks_like_min_reset(costs=None, econ=None):
+        costs = costs or ss
+        econ = econ or ss
+        try:
+            return (
+                float(costs.get('k_misc', cost_defaults['k_misc'])) == 0.0
+                and float(costs.get('residence_time', cost_defaults['residence_time'])) == 0.0
+                and float(econ.get('i_eff', econ_defaults['i_eff'])) == 0.0
+                and float(econ.get('r_n', econ_defaults['r_n'])) == 0.0
+                and float(econ.get('r_n_om', econ_defaults['r_n_om'])) == 0.0
+                and float(econ.get('r_n_el', econ_defaults['r_n_el'])) == 0.0
+                and int(econ.get('n', econ_defaults['n'])) == 1
+                and float(econ.get('omc_rel', econ_defaults['omc_rel'])) == 0.0
+                and float(econ.get('tci_factor', econ_defaults['tci_factor'])) == 0.0
+                and float(econ.get('install_factor', econ_defaults['install_factor'])) == 0.0
+            )
+        except Exception:
+            return False
+
+    force_restore = _looks_like_min_reset()
+    cached_invalid = _looks_like_min_reset(cached_costs, cached_econ)
+    try:
+        kosmadakis_invalid = float(ss.get('kos_project_factor', kosmadakis_defaults['kos_project_factor'])) == 0.0
+    except Exception:
+        kosmadakis_invalid = False
+
+    for key, default in cost_defaults.items():
+        if not cached_invalid and key in cached_costs:
+            target = cached_costs[key]
+        else:
+            target = preset_costs.get(key, default)
+        if force_restore or key not in ss:
+            ss[key] = target
+
+    for key, default in kosmadakis_defaults.items():
+        if not kosmadakis_invalid and key in cached_kosmadakis:
+            target = cached_kosmadakis[key]
+        else:
+            target = preset_costs.get(key, default)
+        if force_restore or kosmadakis_invalid or key not in ss:
+            ss[key] = target
+
+    for key, default in econ_defaults.items():
+        if not cached_invalid and key in cached_econ:
+            target = cached_econ[key]
+        else:
+            target = preset_econ.get(key, default)
+        if force_restore or key not in ss:
+            ss[key] = target
+
+
+def _session_value_kwargs(key, default):
+    """Return a widget `value` kwarg only if the session state is unset."""
+    if key in ss:
+        return {}
+    return {'value': default}
+
+
+def _session_index_kwargs(key, default):
+    """Return a widget `index` kwarg only if the session state is unset."""
+    if key in ss:
+        return {}
+    return {'index': default}
+
+
+def resolve_topology_svg_path(src_path, hp_model_name_topology, *, is_dark=False,
+                              labeled=False):
+    """Return the best matching static topology SVG path or ``None``."""
+    topologies_dir = os.path.join(src_path, 'img', 'topologies')
+    suffix = '_label' if labeled else ''
+    variants = [str(hp_model_name_topology)]
+
+    # Experimental models may intentionally reuse the static diagram of their
+    # closest stable base model until a dedicated SVG exists.
+    if variants[0].endswith('_mbhx'):
+        variants.append(variants[0].removesuffix('_mbhx'))
+
+    filenames = []
+    if is_dark:
+        filenames.extend([
+            f'hp_{name}{suffix}_dark.svg' for name in variants
+        ])
+    filenames.extend([
+        f'hp_{name}{suffix}.svg' for name in variants
+    ])
+
+    for filename in filenames:
+        path = os.path.join(topologies_dir, filename)
+        if os.path.exists(path):
+            return path
+    return None
+
+
+CURATED_MODEL_PRESETS = {
+    'cascade': [
+        {
+            'filename': 'params_hthp_cascade_ref_r290_r600.json',
+            'label': 'HTHP-Referenzfall - R290/R600 - LS 0.4 - Tsrc 40 °C - Dampf 110 °C',
+        },
+        {
+            'filename': 'params_hthp_cascade_ref_r290_r600_standard_cost.json',
+            'label': 'HTHP-Basisreferenzfall - R290/R600 - LS 0.4 - Tsrc 40 °C - Dampf 110 °C | Dashboard-Standardkosten',
+        },
+        {
+            'filename': 'params_hthp_cascade_ref_r717_r600.json',
+            'label': 'HTHP-Referenzfall - R717/R600 - LS 0.4 - Tsrc 40 °C - Dampf 110 °C',
+        },
+        {
+            'filename': 'params_hthp_cascade_ref_r717_r600_standard_cost.json',
+            'label': 'HTHP-Referenzfall - R717/R600 - LS 0.4 - Tsrc 40 °C - Dampf 110 °C | Dashboard-Standardkosten',
+        },
+        {
+            'filename': 'params_hthp_cascade_ref_r290_r600_ls30_tsrc40.json',
+            'label': 'HTHP-Referenzfall - R290/R600 - LS 0.3 - Tsrc 40 °C - Dampf 110 °C',
+        },
+        {
+            'filename': 'params_hthp_cascade_ref_r290_r600_ls30_tsrc40_standard_cost.json',
+            'label': 'HTHP-Referenzfall - R290/R600 - LS 0.3 - Tsrc 40 °C - Dampf 110 °C | Dashboard-Standardkosten',
+        },
+        {
+            'filename': 'params_hthp_cascade_ref_r290_r600_ls40_tsrc30.json',
+            'label': 'HTHP-Referenzfall - R290/R600 - LS 0.4 - Tsrc 30 °C - Dampf 110 °C',
+        },
+        {
+            'filename': 'params_hthp_cascade_ref_r290_r600_ls40_tsrc30_standard_cost.json',
+            'label': 'HTHP-Referenzfall - R290/R600 - LS 0.4 - Tsrc 30 °C - Dampf 110 °C | Dashboard-Standardkosten',
+        },
+    ],
+    'cascade_mbhx': [
+        {
+            'filename': 'params_hthp_cascade_mbhx_ref_r290_r600.json',
+            'label': 'HTHP-Referenzfall - R290/R600 - LS 0.4 - Tsrc 40 °C - Dampf 110 °C | MBHX',
+        },
+    ],
+    'cascade_2ihx': [
+        {
+            'filename': 'params_hthp_cascade_2ihx_compare_r290_r600.json',
+            'label': 'Topologievergleich - Kaskade 2 IHX - R290/R600 - LS 0.4 - Tsrc 40 °C - Dampf 110 °C',
+        },
+        {
+            'filename': 'params_hthp_cascade_2ihx_compare_r717_r600.json',
+            'label': 'Topologievergleich - Kaskade 2 IHX - R717/R600 - LS 0.4 - Tsrc 40 °C - Dampf 110 °C',
+        },
+        {
+            'filename': 'params_hthp_cascade_2ihx_compare_r290_r600_ls30_tsrc40.json',
+            'label': 'Topologievergleich - Kaskade 2 IHX - R290/R600 - LS 0.3 - Tsrc 40 °C - Dampf 110 °C',
+        },
+        {
+            'filename': 'params_hthp_cascade_2ihx_compare_r290_r600_ls40_tsrc30.json',
+            'label': 'Topologievergleich - Kaskade 2 IHX - R290/R600 - LS 0.4 - Tsrc 30 °C - Dampf 110 °C',
+        },
+    ],
+    'flash': [
+        {
+            'filename': 'params_yang2024_flash.json',
+            'label': 'Yang 2024 - Reales Verhalten',
+        },
+        {
+            'filename': 'params_yang2024_flash_literature_idealized.json',
+            'label': 'Yang 2024 - Idealisiert',
+        },
+    ],
+    'econ_closed': [
+        {
+            'filename': 'params_yang2024_econ_closed.json',
+            'label': 'Yang 2024 - Reales Verhalten',
+        },
+        {
+            'filename': 'params_yang2024_econ_closed_literature_idealized.json',
+            'label': 'Yang 2024 - Idealisiert',
+        },
+    ],
+}
+
+
+def get_param_presets_for_model(hp_model_name):
+    """Return the standard parameter file and matching custom presets."""
+    input_dir = _get_input_param_dir()
+    standard_filename = f'params_hp_{hp_model_name}.json'
+    standard_path = os.path.join(input_dir, standard_filename)
+    standard_params = _load_input_json(standard_path)
+    standard_type = standard_params.get('setup', {}).get('type')
+
+    curated_presets = []
+    for preset_meta in CURATED_MODEL_PRESETS.get(hp_model_name, []):
+        json_path = os.path.join(input_dir, preset_meta['filename'])
+        if not os.path.exists(json_path):
+            continue
+
+        try:
+            params = _load_input_json(json_path)
+        except Exception:
+            continue
+
+        setup = params.get('setup', {})
+        if not isinstance(setup, dict):
+            continue
+        if setup.get('type') != standard_type:
+            continue
+
+        curated_presets.append({
+            'label': preset_meta['label'],
+            'filename': preset_meta['filename'],
+            'path': json_path,
+            'is_standard': False,
+            'setup_name': str(
+                setup.get('name') or os.path.splitext(preset_meta['filename'])[0]
+            ),
+        })
+
+    presets = [{
+        'label': 'Standardparameter',
+        'filename': standard_filename,
+        'path': standard_path,
+        'is_standard': True,
+        'setup_name': standard_params.get('setup', {}).get('name', ''),
+    }]
+
+    if curated_presets:
+        presets.extend(curated_presets)
+        return presets
+
+    custom_presets = []
+    for filename in sorted(os.listdir(input_dir)):
+        if not filename.endswith('.json'):
+            continue
+        if filename in {
+            standard_filename,
+            'CEPCI.json',
+            'state_diagram_config.json',
+        }:
+            continue
+
+        json_path = os.path.join(input_dir, filename)
+        try:
+            params = _load_input_json(json_path)
+        except Exception:
+            continue
+
+        setup = params.get('setup', {})
+        if not isinstance(setup, dict):
+            continue
+        if setup.get('type') != standard_type:
+            continue
+
+        setup_name = str(setup.get('name') or os.path.splitext(filename)[0])
+        custom_presets.append({
+            'label': f'{setup_name} ({filename})',
+            'filename': filename,
+            'path': json_path,
+            'is_standard': False,
+            'setup_name': setup_name,
+        })
+
+    presets.extend(
+        sorted(custom_presets, key=lambda preset: preset['label'].lower())
+    )
+    return presets
+
+
+def _reset_design_widget_state(keep_keys):
+    """Clear design widget state while preserving selection controls."""
+    for key in list(ss.keys()):
+        if key not in keep_keys:
+            ss.pop(key)
 
 
 def img_to_base64(image_path):
@@ -505,18 +1437,49 @@ with st.sidebar:
                         hp_model_name_topology = hp_model_name
                     break
 
-            # Hard-reset cached model state when topology/model changes
-            model_signature = f"{base_topology}|{model_name}|{process_type}|{hp_model_name}"
+            preset_options = get_param_presets_for_model(hp_model_name)
+            preset_labels = {
+                preset['path']: preset['label'] for preset in preset_options
+            }
+            preset_filenames = {
+                preset['path']: preset['filename'] for preset in preset_options
+            }
+            preset_paths = [preset['path'] for preset in preset_options]
+            if ss.get('param_preset_path') not in preset_paths:
+                ss.param_preset_path = preset_paths[0]
+
+            selected_param_path = st.selectbox(
+                'Parametersatz',
+                options=preset_paths,
+                format_func=lambda path: preset_labels[path],
+                key='param_preset_path',
+                help='Standardparameter oder kompatible JSON-Presets fuer '
+                     'das aktuell gewaehlte Modell laden.'
+            )
+
+            st.caption(
+                'Geladene Parameterdatei: '
+                + preset_filenames[selected_param_path]
+            )
+
+            # Reset widget state when topology/model/preset changes.
+            model_signature = (
+                f"{base_topology}|{model_name}|{process_type}|"
+                + f"{hp_model_name}|{selected_param_path}"
+            )
             if ss.get("hp_model_signature") != model_signature:
-                _hard_reset_model_state()
+                _reset_design_widget_state({
+                    'select',
+                    'base_topology',
+                    'model',
+                    'param_preset_path',
+                })
                 ss.hp_model_signature = model_signature
 
-            parampath = os.path.abspath(os.path.join(
-                os.path.dirname(__file__), 'models', 'input',
-                f'params_hp_{hp_model_name}.json'
-                ))
-            with open(parampath, 'r', encoding='utf-8') as file:
-                params = json.load(file)
+            parampath = selected_param_path
+            params = deepcopy(_load_input_json(parampath))
+            _apply_dashboard_preset_defaults(params)
+            _restore_cost_finance_widget_state(params)
         if hp_model['nr_ihx'] == 1:
             with st.expander('Interne Wärmerübertragung'):
                 params['ihx']['dT_sh'] = st.slider(
@@ -616,19 +1579,88 @@ with st.sidebar:
 
         with st.expander('Wärmequelle'):
             params.setdefault('setup', {})
+            if supports_general_boundary_modes(hp_model_name):
+                source_mode_options = {
+                    'Fester Temperaturabfall': 'fixed_delta_T',
+                    'Fester Massenstrom': 'fixed_mass_flow',
+                }
+                current_source_mode = get_source_mode_from_params(params)
+                current_source_mode_label = next(
+                    (
+                        label for label, value in source_mode_options.items()
+                        if value == current_source_mode
+                    ),
+                    'Fester Temperaturabfall'
+                )
+                selected_source_mode_label = st.radio(
+                    'Wärmequelle',
+                    options=list(source_mode_options.keys()),
+                    index=list(source_mode_options.keys()).index(
+                        current_source_mode_label
+                    ),
+                    key='source_mode_selector'
+                )
+                params['setup']['source_mode'] = source_mode_options[
+                    selected_source_mode_label
+                ]
+
             params['B1']['T'] = st.slider(
                 'Temperatur Vorlauf', min_value=0, max_value=T_crit,
                 value=params['B1']['T'], format='%d°C', key='T_heatsource_ff'
-                )
-            params['B2']['T'] = st.slider(
-                'Temperatur Rücklauf', min_value=0, max_value=T_crit,
-                value=params['B2']['T'], format='%d°C', key='T_heatsource_bf'
                 )
             params['B1']['p'] = st.number_input(
                 'Druck Wärmequelle [bar]', min_value=0.1, max_value=200.0,
                 value=float(params['B1'].get('p', 1.013)),
                 step=0.1, format='%.3f', key='p_heatsource'
             )
+            if supports_general_boundary_modes(hp_model_name):
+                params['setup']['use_source_pump'] = st.checkbox(
+                    'Quellenpumpe modellieren',
+                    value=bool(params['setup'].get('use_source_pump', True)),
+                    key='use_source_pump_checkbox'
+                )
+                default_delta = float(get_source_delta_T_from_params(params))
+                params['setup']['source_delta_T'] = st.number_input(
+                    'Temperaturabfall Quelle [K]',
+                    min_value=0.1,
+                    max_value=100.0,
+                    value=float(max(default_delta, 0.1)),
+                    step=0.5,
+                    format='%.1f',
+                    key='source_delta_T_input'
+                )
+                params['B2']['T'] = (
+                    float(params['B1']['T']) - float(params['setup']['source_delta_T'])
+                )
+                if params['setup']['source_mode'] == 'fixed_mass_flow':
+                    params['setup']['m_source'] = st.number_input(
+                        'Quellmassenstrom [kg/s]',
+                        min_value=0.01,
+                        max_value=500.0,
+                        value=float(
+                            params['setup'].get(
+                                'm_source', params['B1'].get('m', 15.0)
+                            )
+                        ),
+                        step=0.5,
+                        format='%.2f',
+                        key='m_source_input'
+                    )
+                    params['B1']['m'] = params['setup']['m_source']
+                    st.caption(
+                        'Der Quellruecklauf ist in diesem Modus ein '
+                        + 'Rechenergebnis. Der Temperaturabfall dient als '
+                        + 'Startwert fuer T_mid und die Initialisierung.'
+                    )
+                else:
+                    st.caption(
+                        f"Resultierender Quellruecklauf: {params['B2']['T']:.1f} °C"
+                    )
+            else:
+                params['B2']['T'] = st.slider(
+                    'Temperatur Rücklauf', min_value=0, max_value=T_crit,
+                    value=params['B2']['T'], format='%d°C', key='T_heatsource_bf'
+                    )
 
             invalid_temp_diff = params['B2']['T'] >= params['B1']['T']
             if invalid_temp_diff:
@@ -644,53 +1676,477 @@ with st.sidebar:
                      'nicht unter die Umgebungstemperatur fällt.'
             )
 
-        # TODO: Aktuell wird T_mid im Modell als Mittelwert zwischen von Ver-
-        #       dampfungs- und Kondensationstemperatur gebildet. An sich wäre
-        #       es analytisch sicher interessant den Wert selbst festlegen zu
-        #       können.
-        # if hp_model['nr_refrigs'] == 2:
-        #     with st.expander('Zwischenwärmeübertrager'):
-        #         param['design']['T_mid'] = st.slider(
-        #             'Mittlere Temperatur', min_value=0, max_value=T_crit,
-        #             value=40, format='%d°C', key='T_mid'
-        #             )
-
         with st.expander('Wärmesenke'):
             T_max_sink = T_crit
-            if 'trans' in hp_model_name:
+            if 'trans' in hp_model_name or supports_general_boundary_modes(hp_model_name):
                 T_max_sink = 200  # °C -- Ad hoc value, maybe find better one
-
-            params['C3']['T'] = st.slider(
-                'Temperatur Vorlauf', min_value=0, max_value=T_max_sink,
-                value=params['C3']['T'], format='%d°C', key='T_consumer_ff'
-            )
-            if 'C2' in params:
-                params['C2']['T'] = params['C3']['T']
-            params['C1']['T'] = st.slider(
-                'Temperatur Rücklauf', min_value=0, max_value=T_max_sink,
-                value=params['C1']['T'], format='%d°C', key='T_consumer_bf'
-            )
-            sink_pressure = st.number_input(
-                'Druck Wärmesenke [bar]', min_value=0.1, max_value=200.0,
-                value=float(params.get('C3', {}).get('p', params['C1'].get('p', 10.0))),
-                step=0.1, format='%.3f', key='p_consumer'
-            )
+            params.setdefault('C2', {})
             params.setdefault('C3', {})
-            params['C3']['p'] = sink_pressure
-            params['C1']['p'] = sink_pressure
 
-            invalid_temp_diff = params['C1']['T'] >= params['C3']['T']
-            if invalid_temp_diff:
-                st.error(
-                    'Die Rücklauftemperatur muss niedriger sein, als die '
-                    + 'Vorlauftemperatur.'
+            if supports_general_boundary_modes(hp_model_name):
+                sink_mode_options = {
+                    'Normales Heizen': 'sensible',
+                    'Dampferzeugung': 'steam',
+                }
+                current_sink_mode = get_sink_mode_from_params(params)
+                current_sink_mode_label = next(
+                    (
+                        label for label, value in sink_mode_options.items()
+                        if value == current_sink_mode
+                    ),
+                    'Normales Heizen'
                 )
-            invalid_temp_diff = params['C1']['T'] <= params['B1']['T']
+                selected_sink_mode_label = st.radio(
+                    'Senkenrandbedingung',
+                    options=list(sink_mode_options.keys()),
+                    index=list(sink_mode_options.keys()).index(
+                        current_sink_mode_label
+                    ),
+                    key='sink_mode_selector'
+                )
+                params['setup']['sink_mode'] = sink_mode_options[
+                    selected_sink_mode_label
+                ]
+
+                if params['setup']['sink_mode'] == 'steam':
+                    params['setup']['use_sink_pump'] = False
+                    params['setup']['T_steam'] = st.number_input(
+                        'Dampftemperatur [°C]',
+                        min_value=50.0,
+                        max_value=200.0,
+                        value=float(params['setup'].get('T_steam', 110.0)),
+                        step=1.0,
+                        format='%.1f',
+                        key='T_steam_input'
+                    )
+                    params['setup']['m_steam'] = st.number_input(
+                        'Dampfmassenstrom [kg/s]',
+                        min_value=0.01,
+                        max_value=50.0,
+                        value=float(params['setup'].get('m_steam', 0.5)),
+                        step=0.05,
+                        format='%.2f',
+                        key='m_steam_input'
+                    )
+                    sink_pressure = PSI(
+                        'P', 'Q', 0,
+                        'T', float(params['setup']['T_steam']) + 273.15,
+                        params['fluids']['si']
+                    ) * 1e-5
+                    params['C1']['T'] = float(params['setup']['T_steam'])
+                    params['C2']['T'] = float(params['setup']['T_steam'])
+                    params['C3']['T'] = float(params['setup']['T_steam'])
+                    params['C1']['p'] = sink_pressure
+                    params['C2']['p'] = sink_pressure
+                    params['C3']['p'] = sink_pressure
+                    params['C1']['m'] = float(params['setup']['m_steam'])
+                    st.caption(
+                        f"Sattdruck bei {params['setup']['T_steam']:.1f} °C: "
+                        + f'{sink_pressure:.3f} bar. Die Senkenpumpe ist in '
+                        + 'diesem Modus deaktiviert.'
+                    )
+                else:
+                    params['setup']['use_sink_pump'] = st.checkbox(
+                        'Senkenpumpe modellieren',
+                        value=bool(params['setup'].get('use_sink_pump', True)),
+                        key='use_sink_pump_checkbox'
+                    )
+                    params['C3']['T'] = st.slider(
+                        'Temperatur Vorlauf', min_value=0, max_value=T_max_sink,
+                        value=params['C3']['T'], format='%d°C', key='T_consumer_ff'
+                    )
+                    params['C2']['T'] = params['C3']['T']
+                    params['C1']['T'] = st.slider(
+                        'Temperatur Rücklauf', min_value=0, max_value=T_max_sink,
+                        value=params['C1']['T'], format='%d°C', key='T_consumer_bf'
+                    )
+                    sink_pressure = st.number_input(
+                        'Druck Wärmesenke [bar]', min_value=0.1, max_value=200.0,
+                        value=float(
+                            params.get('C3', {}).get(
+                                'p', params['C1'].get('p', 10.0)
+                            )
+                        ),
+                        step=0.1, format='%.3f', key='p_consumer'
+                    )
+                    params['C3']['p'] = sink_pressure
+                    params['C1']['p'] = sink_pressure
+            else:
+                params['C3']['T'] = st.slider(
+                    'Temperatur Vorlauf', min_value=0, max_value=T_max_sink,
+                    value=params['C3']['T'], format='%d°C', key='T_consumer_ff'
+                )
+                if 'C2' in params:
+                    params['C2']['T'] = params['C3']['T']
+                params['C1']['T'] = st.slider(
+                    'Temperatur Rücklauf', min_value=0, max_value=T_max_sink,
+                    value=params['C1']['T'], format='%d°C', key='T_consumer_bf'
+                )
+                sink_pressure = st.number_input(
+                    'Druck Wärmesenke [bar]', min_value=0.1, max_value=200.0,
+                    value=float(params.get('C3', {}).get('p', params['C1'].get('p', 10.0))),
+                    step=0.1, format='%.3f', key='p_consumer'
+                )
+                params.setdefault('C3', {})
+                params['C3']['p'] = sink_pressure
+                params['C1']['p'] = sink_pressure
+
+            if get_sink_mode_from_params(params) == 'sensible':
+                invalid_temp_diff = params['C1']['T'] >= params['C3']['T']
+                if invalid_temp_diff:
+                    st.error(
+                        'Die Rücklauftemperatur muss niedriger sein, als die '
+                        + 'Vorlauftemperatur.'
+                    )
+            invalid_temp_diff = get_sink_hot_target_temp_from_params(params) <= params['B1']['T']
             if invalid_temp_diff:
                 st.error(
                     'Die Temperatur der Wärmesenke muss höher sein, als die '
                     + 'der Wärmequelle.'
                 )
+
+        main_hex_ttd_targets = get_main_hex_ttd_targets(params)
+        if main_hex_ttd_targets:
+            with st.expander('Hauptwärmeübertrager'):
+                default_global_ttd = params.get('setup', {}).get(
+                    'global_ttd_main_hex'
+                )
+                if default_global_ttd is None:
+                    default_global_ttd = params[
+                        main_hex_ttd_targets[0][0]
+                    ][main_hex_ttd_targets[0][1]]
+
+                global_ttd = st.slider(
+                    'Globaler minimaler Temperaturabstand',
+                    min_value=0.5,
+                    max_value=30.0,
+                    value=float(default_global_ttd),
+                    step=0.5,
+                    format='%.1f K',
+                    key='global_main_hex_ttd'
+                )
+                apply_global_main_hex_ttd(params, global_ttd)
+
+                component_names = {
+                    'evap': 'Verdampfer',
+                    'cond': 'Kondensator',
+                    'inter': 'Zwischenwärmeübertrager',
+                    'trans': 'Gaskühler',
+                    'econ': 'Economizer',
+                    'econ1': 'Economizer 1',
+                    'econ2': 'Economizer 2',
+                }
+                active_components = [
+                    component_names.get(comp_key, comp_key)
+                    for comp_key, _ in main_hex_ttd_targets
+                ]
+                st.caption(
+                    'Der Wert wird auf folgende Hauptwärmeübertrager '
+                    + 'angewendet: '
+                    + ', '.join(active_components)
+                    + '.'
+                )
+
+        if (
+            supports_explicit_suction_superheat(hp_model)
+            or supports_explicit_subcooling(hp_model)
+            or supports_rip_factor(hp_model)
+            or supports_explicit_injection_superheat(hp_model)
+            or supports_a_target_calibration(hp_model_name)
+        ):
+            with st.expander('Erweiterte Kreisprozessparameter'):
+                params.setdefault('setup', {})
+
+                if supports_explicit_suction_superheat(hp_model):
+                    params['setup']['dT_sup'] = st.slider(
+                        'Verdichtersaugüberhitzung',
+                        min_value=0.0,
+                        max_value=30.0,
+                        value=float(params['setup'].get('dT_sup', 0.0)),
+                        step=0.5,
+                        format='%.1f K',
+                        key='dT_sup_cycle'
+                    )
+
+                if supports_explicit_subcooling(hp_model):
+                    params['setup']['dT_sub'] = st.slider(
+                        'Unterkühlung',
+                        min_value=0.0,
+                        max_value=30.0,
+                        value=float(params['setup'].get('dT_sub', 0.0)),
+                        step=0.5,
+                        format='%.1f K',
+                        key='dT_sub_cycle'
+                    )
+                    st.caption(
+                        'Die Unterkühlung wird für subkritische '
+                        + 'Ein-Kältemittel-Modelle ohne IHX berücksichtigt, '
+                        + 'also z. B. auch bei Flashtank und geschlossenem '
+                        + 'Economizer.'
+                    )
+
+                if (
+                    supports_rip_factor(hp_model)
+                    or supports_a_target_calibration(hp_model_name)
+                ):
+                    calibration_options = {'RIP direkt vorgeben': 'rip'}
+                    if supports_a_target_calibration(hp_model_name):
+                        calibration_options['A_target kalibrieren'] = 'a_target'
+
+                    current_calibration_mode = params['setup'].get(
+                        'calibration_mode', 'rip'
+                    )
+                    calibration_label = next(
+                        (
+                            label
+                            for label, value in calibration_options.items()
+                            if value == current_calibration_mode
+                        ),
+                        'RIP direkt vorgeben'
+                    )
+                    selected_calibration_label = st.radio(
+                        'Literatur-Kalibrierung',
+                        options=list(calibration_options.keys()),
+                        index=list(calibration_options.keys()).index(
+                            calibration_label
+                        ),
+                        key='cycle_calibration_mode'
+                    )
+                    params['setup']['calibration_mode'] = calibration_options[
+                        selected_calibration_label
+                    ]
+
+                if (
+                    supports_rip_factor(hp_model)
+                    and params['setup'].get('calibration_mode', 'rip') != 'a_target'
+                ):
+                    params['setup']['rip_factor'] = st.slider(
+                        'Zwischendruckfaktor RIP',
+                        min_value=0.5,
+                        max_value=1.5,
+                        value=float(params['setup'].get('rip_factor', 1.0)),
+                        step=0.01,
+                        format='%.2f',
+                        key='rip_factor_cycle'
+                    )
+
+                if (
+                    supports_a_target_calibration(hp_model_name)
+                    and params['setup'].get('calibration_mode') == 'a_target'
+                ):
+                    params['setup']['A_target'] = st.slider(
+                        'Einspritzmassenanteil A_target',
+                        min_value=0.05,
+                        max_value=1.20,
+                        value=float(params['setup'].get('A_target', 0.30)),
+                        step=0.01,
+                        format='%.2f',
+                        key='a_target_cycle'
+                    )
+
+                if supports_explicit_injection_superheat(hp_model):
+                    params['setup']['dT_sup_inj'] = st.slider(
+                        'Einspritz-Überhitzung',
+                        min_value=0.0,
+                        max_value=30.0,
+                        value=float(params['setup'].get('dT_sup_inj', 0.0)),
+                        step=0.5,
+                        format='%.1f K',
+                        key='dT_sup_inj_cycle'
+                    )
+
+                caption_parts = []
+                if supports_explicit_suction_superheat(hp_model):
+                    caption_parts.append(
+                        'Die Verdichtersaugüberhitzung beschreibt die zusätzliche '
+                        'Erwärmung des Kältemittels vor dem ersten Verdichter.'
+                    )
+                if supports_explicit_subcooling(hp_model):
+                    caption_parts.append(
+                        'Die Unterkühlung beschreibt die zusätzliche Abkühlung '
+                        'der Flüssigkeit nach dem Kondensator.'
+                    )
+                if supports_rip_factor(hp_model):
+                    if params['setup'].get('calibration_mode', 'rip') == 'a_target':
+                        caption_parts.append(
+                            'Im Literaturmodus wird RIP automatisch so kalibriert, '
+                            'dass der gewünschte Einspritzmassenanteil A_target '
+                            'möglichst gut erreicht wird.'
+                        )
+                    else:
+                        caption_parts.append(
+                            'RIP = 1.00 entspricht dem geometrischen Mitteldruck. '
+                            'Kleinere oder größere Werte verschieben die '
+                            'Lastaufteilung zwischen erster und zweiter '
+                            'Verdichterstufe. Zusätzliche Druckverluste in den '
+                            'Bauteilen können das sichtbare Druckniveau weiter '
+                            'verschieben.'
+                        )
+                if supports_explicit_injection_superheat(hp_model):
+                    caption_parts.append(
+                        'Die Einspritz-Überhitzung beschreibt den zusätzlichen '
+                        'Temperaturabstand der Einspritzleitung zum Siedepunkt. '
+                        'Sie wird aktuell nur für geschlossene Economizer-Topologien '
+                        'angeboten.'
+                    )
+                if caption_parts:
+                    st.caption(' '.join(caption_parts))
+
+        if supports_general_boundary_modes(hp_model_name):
+            with st.expander('Allgemeine Systemparameter'):
+                params.setdefault('setup', {})
+                params['setup']['motor_eta'] = st.slider(
+                    'Motorwirkungsgrad',
+                    min_value=50.0,
+                    max_value=100.0,
+                    value=float(params['setup'].get('motor_eta', 0.98) * 100),
+                    step=0.5,
+                    format='%.1f%%',
+                    key='motor_eta_slider'
+                ) / 100.0
+                params['setup']['skip_ommen_check'] = st.checkbox(
+                    'Ommen-Druckgrenzen ignorieren',
+                    value=bool(params['setup'].get('skip_ommen_check', False)),
+                    key='skip_ommen_check_checkbox'
+                )
+
+        if hp_model['nr_refrigs'] == 2:
+            with st.expander('Zwischenwärmeübertrager'):
+                params.setdefault('setup', {})
+                (
+                    t_source_cold, t_sink_hot, t_mid_min, t_mid_max
+                ) = get_cascade_t_mid_bounds(params)
+
+                t_mid_min = float(np.round(t_mid_min, 1))
+                t_mid_max = float(np.round(t_mid_max, 1))
+
+                if t_mid_max <= t_mid_min:
+                    st.warning(
+                        'Für die aktuellen Quell- und Senkentemperaturen '
+                        + 'konnte kein sinnvoller Bereich für T_mid bestimmt '
+                        + 'werden.'
+                    )
+                else:
+                    if supports_general_boundary_modes(hp_model_name):
+                        split_mode_options = {
+                            'T_mid direkt': 't_mid',
+                            'Lift Share': 'lift_share',
+                        }
+                        current_split_mode = str(
+                            params['setup'].get('cascade_split_mode', 't_mid')
+                        )
+                        current_split_mode_label = next(
+                            (
+                                label
+                                for label, value in split_mode_options.items()
+                                if value == current_split_mode
+                            ),
+                            'T_mid direkt'
+                        )
+                        selected_split_mode_label = st.radio(
+                            'Aufteilung Temperaturhub',
+                            options=list(split_mode_options.keys()),
+                            index=list(split_mode_options.keys()).index(
+                                current_split_mode_label
+                            ),
+                            key='cascade_split_mode_selector'
+                        )
+                        params['setup']['cascade_split_mode'] = (
+                            split_mode_options[selected_split_mode_label]
+                        )
+
+                    if params['setup'].get('cascade_split_mode', 't_mid') == 'lift_share':
+                        source_hot = float(params['B1']['T'])
+                        inter_ttd = float(params.get('inter', {}).get('ttd_u', 0.0))
+                        gross_lift = max(t_sink_hot - source_hot, 1e-9)
+                        lift_max = (
+                            t_sink_hot - inter_ttd / 2.0 - source_hot
+                        ) / gross_lift
+                        lift_max = float(min(max(lift_max, 0.0), 0.99))
+                        if lift_max <= 0:
+                            st.warning(
+                                'Für die aktuellen Randbedingungen konnte kein '
+                                + 'gueltiger Lift-Share-Bereich bestimmt werden.'
+                            )
+                        else:
+                            default_lift_share = float(
+                                params['setup'].get('lift_share', 0.5)
+                            )
+                            params['setup']['lift_share'] = st.slider(
+                                'Lift Share',
+                                min_value=0.0,
+                                max_value=lift_max,
+                                value=float(
+                                    np.clip(default_lift_share, 0.0, lift_max)
+                                ),
+                                step=0.01,
+                                format='%.2f',
+                                key='lift_share_slider'
+                            )
+                            params['setup']['T34'] = (
+                                source_hot
+                                + params['setup']['lift_share']
+                                * (t_sink_hot - source_hot)
+                            )
+                            params['setup']['t_mid'] = (
+                                params['setup']['T34'] + inter_ttd / 2.0
+                            )
+                            params['setup']['t_mid_fraction'] = (
+                                (params['setup']['t_mid'] - t_source_cold)
+                                / max(t_sink_hot - t_source_cold, 1e-9)
+                            )
+                            st.caption(
+                                f"T_34 = {params['setup']['T34']:.2f} °C, "
+                                + f"T_mid = {params['setup']['t_mid']:.2f} °C, "
+                                + f"α = {params['setup']['t_mid_fraction']:.3f}."
+                            )
+                    else:
+                        default_t_mid = params['setup'].get('t_mid')
+                        if default_t_mid is None:
+                            default_fraction = float(
+                                params['setup'].get('t_mid_fraction', 0.5)
+                            )
+                            default_t_mid = (
+                                t_source_cold
+                                + default_fraction * (t_sink_hot - t_source_cold)
+                            )
+
+                        default_t_mid = float(
+                            np.clip(default_t_mid, t_mid_min, t_mid_max)
+                        )
+
+                        params['setup']['t_mid'] = st.slider(
+                            'Mittlere Temperatur T_mid',
+                            min_value=t_mid_min,
+                            max_value=t_mid_max,
+                            value=default_t_mid,
+                            step=0.5,
+                            format='%.1f°C',
+                            key='T_mid'
+                        )
+
+                        params['setup']['t_mid_fraction'] = (
+                            (params['setup']['t_mid'] - t_source_cold)
+                            / max(t_sink_hot - t_source_cold, 1e-9)
+                        )
+                        source_hot = float(params['B1']['T'])
+                        inter_ttd = float(params.get('inter', {}).get('ttd_u', 0.0))
+                        params['setup']['T34'] = (
+                            params['setup']['t_mid'] - inter_ttd / 2.0
+                        )
+                        params['setup']['lift_share'] = (
+                            (params['setup']['T34'] - source_hot)
+                            / max(t_sink_hot - source_hot, 1e-9)
+                        )
+
+                        st.caption(
+                            'Die Eingabe bestimmt die Lage von T_mid zwischen '
+                            + 'kaltem Quellende und warmem Senkenende. Je größer '
+                            + 'α, desto höher liegt T_mid und desto mehr '
+                            + 'Temperaturhub übernimmt der Niedertemperaturkreis. '
+                            + f"Aktuell: α = {params['setup']['t_mid_fraction']:.3f}, "
+                            + f"Lift Share = {params['setup']['lift_share']:.3f}."
+                        )
 
         with st.expander('Verdichter'):
             nr_refrigs = hp_model['nr_refrigs']
@@ -763,139 +2219,366 @@ with st.sidebar:
             with open(cepcipath, 'r', encoding='utf-8') as file:
                 cepci = json.load(file)
 
-            st.caption(
-                'Das CEPCI-Referenzjahr ist fest auf 2015 gesetzt. '
-                'Im Dashboard wird nur das aktuelle Kostenjahr ausgewählt.'
+            costcalcparams['cost_method'] = st.selectbox(
+                'Kostenmethodik',
+                options=list(COST_METHOD_OPTIONS.keys()),
+                format_func=lambda x: COST_METHOD_OPTIONS[x],
+                key='cost_method',
+                **_session_index_kwargs(
+                    'cost_method',
+                    list(COST_METHOD_OPTIONS.keys()).index(
+                        ss.get('cost_method', 'standard')
+                        if ss.get('cost_method', 'standard') in COST_METHOD_OPTIONS
+                        else 'standard'
+                    )
+                )
             )
 
+            repo_cost_mode = costcalcparams['cost_method'] == 'repo_hthp'
+            if repo_cost_mode:
+                pass
+            else:
+                st.caption(
+                    'Das CEPCI-Referenzjahr ist fest auf 2015 gesetzt. '
+                    + 'Im Dashboard wird nur das aktuelle Kostenjahr ausgewählt.'
+                )
+
             costcalcparams['current_year'] = st.selectbox(
-                'Jahr der Kostenkalkulation',
+                'CEPCI-Kostenindexjahr' if repo_cost_mode else 'Jahr der Kostenkalkulation',
                 options=sorted(list(cepci.keys()), reverse=True),
-                key='current_year'
+                key='current_year',
+                **_session_index_kwargs(
+                    'current_year',
+                    0 if '2025' not in cepci else sorted(list(cepci.keys()), reverse=True).index('2025')
+                )
             )
+
+            if repo_cost_mode:
+                costcalcparams['analysis_year'] = st.number_input(
+                    'Analysejahr',
+                    min_value=1980, max_value=2100, step=1,
+                    key='analysis_year',
+                    **_session_value_kwargs('analysis_year', 2026)
+                )
+            else:
+                costcalcparams['analysis_year'] = int(costcalcparams['current_year'])
 
             costcalcparams['elec_price_cent_kWh'] = st.number_input(
                 'Strompreis [ct/kWh]',
                 min_value=0.0, max_value=200.0, step=1.0,
-                value=float(ss.get('elec_price_cent_kWh', 40.0)),
-                key='elec_price_cent_kWh'
+                key='elec_price_cent_kWh',
+                **_session_value_kwargs('elec_price_cent_kWh', 40.0)
             )
 
             costcalcparams['b1_cost_eur_per_GJ'] = st.number_input(
                 'Kosten Feedwater B1 [EUR/GJ]',
                 min_value=0.0, max_value=10000.0, step=0.1,
-                value=float(ss.get('b1_cost_eur_per_GJ', 0.0)),
                 format='%.2f',
-                key='b1_cost_eur_per_GJ'
+                key='b1_cost_eur_per_GJ',
+                **_session_value_kwargs('b1_cost_eur_per_GJ', 0.0)
             )
 
             costcalcparams['tau_h_per_year'] = st.number_input(
                 'Volllaststunden [h/a]',
                 min_value=0.0, max_value=9000.0, step=100.0,
-                value=float(ss.get('tau_h_per_year', 5500.0)),
-                key='tau_h_per_year'
+                key='tau_h_per_year',
+                **_session_value_kwargs('tau_h_per_year', 5500.0)
             )
 
             costcalcparams['usd_to_eur'] = st.number_input(
                 'Währungsumrechnung USD → EUR [-]',
                 min_value=0.1, max_value=5.0, step=0.01,
-                value=float(ss.get('usd_to_eur', 0.93)),
                 format='%.2f',
-                key='usd_to_eur'
+                key='usd_to_eur',
+                **_session_value_kwargs('usd_to_eur', 0.93)
             )
 
             costcalcparams['hex_cost_model'] = st.selectbox(
                 'PEC Wärmeübertrager',
                 options=list(PEC_HEX_OPTIONS.keys()),
                 format_func=lambda x: PEC_HEX_OPTIONS[x]['label'],
-                index=list(PEC_HEX_OPTIONS.keys()).index(
-                    ss.get('hex_cost_model', 'ommen')
-                    if ss.get('hex_cost_model', 'ommen') in PEC_HEX_OPTIONS
-                    else 'ommen'
-                ),
-                key='hex_cost_model'
+                key='hex_cost_model',
+                **_session_index_kwargs(
+                    'hex_cost_model',
+                    list(PEC_HEX_OPTIONS.keys()).index(
+                        ss.get('hex_cost_model', 'ommen')
+                        if ss.get('hex_cost_model', 'ommen') in PEC_HEX_OPTIONS
+                        else 'ommen'
+                    )
+                )
             )
 
             costcalcparams['compressor_cost_model'] = st.selectbox(
                 'PEC Verdichter',
                 options=list(PEC_COMP_OPTIONS.keys()),
                 format_func=lambda x: PEC_COMP_OPTIONS[x]['label'],
-                index=list(PEC_COMP_OPTIONS.keys()).index(
-                    ss.get('compressor_cost_model', 'ommen')
-                    if ss.get('compressor_cost_model', 'ommen') in PEC_COMP_OPTIONS
-                    else 'ommen'
-                ),
-                key='compressor_cost_model'
+                key='compressor_cost_model',
+                **_session_index_kwargs(
+                    'compressor_cost_model',
+                    list(PEC_COMP_OPTIONS.keys()).index(
+                        ss.get('compressor_cost_model', 'ommen')
+                        if ss.get('compressor_cost_model', 'ommen') in PEC_COMP_OPTIONS
+                        else 'ommen'
+                    )
+                )
             )
 
             costcalcparams['flash_cost_model'] = st.selectbox(
                 'PEC Flashtank',
                 options=list(PEC_FLASH_OPTIONS.keys()),
                 format_func=lambda x: PEC_FLASH_OPTIONS[x]['label'],
-                index=list(PEC_FLASH_OPTIONS.keys()).index(
-                    ss.get('flash_cost_model', 'ommen')
-                    if ss.get('flash_cost_model', 'ommen') in PEC_FLASH_OPTIONS
-                    else 'ommen'
-                ),
-                key='flash_cost_model'
+                key='flash_cost_model',
+                **_session_index_kwargs(
+                    'flash_cost_model',
+                    list(PEC_FLASH_OPTIONS.keys()).index(
+                        ss.get('flash_cost_model', 'ommen')
+                        if ss.get('flash_cost_model', 'ommen') in PEC_FLASH_OPTIONS
+                        else 'ommen'
+                    )
+                )
             )
             st.caption('Die Pumpenkorrelation ist aktuell fest auf Shamoushaki et al. gesetzt.')
+
+            if repo_cost_mode:
+                costcalcparams['include_pumps_in_pec'] = st.checkbox(
+                    'Pumpen in TCI berücksichtigen',
+                    key='include_pumps_in_pec',
+                    **_session_value_kwargs('include_pumps_in_pec', True)
+                )
+                costcalcparams['hx_area_method'] = st.selectbox(
+                    'Repo-HX-Flächenansatz',
+                    options=['q_lmtd', 'tespy_ka'],
+                    format_func=lambda x: (
+                        'Q / (U * LMTD)' if x == 'q_lmtd'
+                        else 'TESPy kA / U'
+                    ),
+                    key='hx_area_method',
+                    **_session_index_kwargs(
+                        'hx_area_method',
+                        1 if ss.get('hx_area_method', 'q_lmtd') == 'tespy_ka' else 0
+                    )
+                )
+                costcalcparams['compressor_eta_vol'] = float(
+                    ss.get('compressor_eta_vol', 1.0)
+                )
+                costcalcparams['compressor_eta_vol_lt'] = st.number_input(
+                    'Volumetrischer Wirkungsgrad LT-Verdichter η_vol,LT [-]',
+                    min_value=0.1, max_value=1.5, step=0.01,
+                    format='%.2f',
+                    key='compressor_eta_vol_lt',
+                    **_session_value_kwargs(
+                        'compressor_eta_vol_lt',
+                        float(ss.get('compressor_eta_vol', 1.0))
+                    )
+                )
+                costcalcparams['compressor_eta_vol_ht'] = st.number_input(
+                    'Volumetrischer Wirkungsgrad HT-Verdichter η_vol,HT [-]',
+                    min_value=0.1, max_value=1.5, step=0.01,
+                    format='%.2f',
+                    key='compressor_eta_vol_ht',
+                    **_session_value_kwargs(
+                        'compressor_eta_vol_ht',
+                        float(ss.get('compressor_eta_vol', 1.0))
+                    )
+                )
+            else:
+                costcalcparams['include_pumps_in_pec'] = True
+                costcalcparams['hx_area_method'] = 'q_lmtd'
+                costcalcparams['compressor_eta_vol'] = 1.0
+                costcalcparams['compressor_eta_vol_lt'] = 1.0
+                costcalcparams['compressor_eta_vol_ht'] = 1.0
 
             costcalcparams['k_evap'] = st.slider(
                 'Wärmedurchgangskoeffizient (Verdampfung)',
                 min_value=0, max_value=5000, step=10,
-                value=1500, format='%d W/m²K', key='k_evap'
+                format='%d W/m²K', key='k_evap',
+                **_session_value_kwargs('k_evap', 1500)
                 )
 
             costcalcparams['k_cond'] = st.slider(
                 'Wärmedurchgangskoeffizient (Verflüssigung)',
                 min_value=0, max_value=5000, step=10,
-                value=3500, format='%d W/m²K', key='k_cond'
+                format='%d W/m²K', key='k_cond',
+                **_session_value_kwargs('k_cond', 3500)
                 )
+
+            if hp_model['nr_refrigs'] == 2:
+                costcalcparams['k_inter'] = st.slider(
+                    'Wärmedurchgangskoeffizient (Zwischenwärmeübertrager)',
+                    min_value=0, max_value=5000, step=10,
+                    format='%d W/m²K', key='k_inter',
+                    **_session_value_kwargs('k_inter', 2200)
+                )
+            else:
+                costcalcparams['k_inter'] = int(ss.get('k_inter', 2200))
+
+            if 'ihx' in hp_model_name:
+                costcalcparams['k_ihx'] = st.slider(
+                    'Wärmedurchgangskoeffizient (Interner Wärmeübertrager, IHX)',
+                    min_value=0, max_value=5000, step=10,
+                    format='%d W/m²K', key='k_ihx',
+                    **_session_value_kwargs('k_ihx', 1500)
+                )
+            else:
+                costcalcparams['k_ihx'] = int(ss.get('k_ihx', 1500))
 
             if 'trans' in hp_model_name:
                 costcalcparams['k_trans'] = st.slider(
                     'Wärmedurchgangskoeffizient (transkritisch)',
                     min_value=0, max_value=1000, step=5,
-                    value=60, format='%d W/m²K', key='k_trans'
+                    format='%d W/m²K', key='k_trans',
+                    **_session_value_kwargs('k_trans', 60)
                     )
 
             costcalcparams['k_misc'] = st.slider(
                 'Wärmedurchgangskoeffizient (Sonstige)',
                 min_value=0, max_value=1000, step=5,
-                value=50, format='%d W/m²K', key='k_misc'
+                format='%d W/m²K', key='k_misc',
+                **_session_value_kwargs('k_misc', 50)
                 )
 
             costcalcparams['residence_time'] = st.slider(
                 'Verweildauer Flashtank',
                 min_value=0, max_value=60, step=1,
-                value=10, format='%d s', key='residence_time'
+                format='%d s', key='residence_time',
+                **_session_value_kwargs('residence_time', 10)
                 )
 
+            st.markdown('**Weitere Parameter für die exergoökonomische Analyse**')
+            st.number_input(
+                'Effektiver Zinssatz i_eff [-]',
+                min_value=0.0, max_value=1.0, step=0.005,
+                format='%.3f', key='i_eff',
+                **_session_value_kwargs('i_eff', 0.08)
+            )
+            st.number_input(
+                'Nutzungsdauer n [a]',
+                min_value=1, max_value=100, step=1,
+                key='n',
+                **_session_value_kwargs('n', 20)
+            )
+            st.number_input(
+                'Relative O&M-Kosten f_O&M [-]',
+                min_value=0.0, max_value=1.0, step=0.005,
+                format='%.3f', key='omc_rel',
+                **_session_value_kwargs('omc_rel', 0.03)
+            )
+            if repo_cost_mode:
+                st.number_input(
+                    'Preissteigerungsrate O&M / allgemeine Inflation R_N_OM [-]',
+                    min_value=0.0, max_value=1.0, step=0.005,
+                    format='%.3f', key='r_n_om',
+                    **_session_value_kwargs('r_n_om', 0.02)
+                )
+                st.number_input(
+                    'Preissteigerungsrate Strom R_N_EL [-]',
+                    min_value=0.0, max_value=1.0, step=0.005,
+                    format='%.3f', key='r_n_el',
+                    **_session_value_kwargs('r_n_el', 0.02)
+                )
+                st.number_input(
+                    'Installationsfaktor F_install [-]',
+                    min_value=0.0, max_value=50.0, step=0.1,
+                    format='%.2f', key='install_factor',
+                    **_session_value_kwargs('install_factor', 4.16)
+                )
+            else:
+                st.number_input(
+                    'Preissteigerungsrate r_n [-]',
+                    min_value=0.0, max_value=1.0, step=0.005,
+                    format='%.3f', key='r_n',
+                    **_session_value_kwargs('r_n', 0.02)
+                )
+                st.number_input(
+                    'TCI-Faktor [-]',
+                    min_value=0.0, max_value=50.0, step=0.1,
+                    format='%.2f', key='tci_factor',
+                    **_session_value_kwargs('tci_factor', 6.32)
+                )
+
+        kosmadakis_params = {}
         with st.expander('Parameter für Projektkostenabschätzung nach Kosmadakis et al. (2020)'):
-            costcalcparams['gas_price_cent_kWh'] = st.number_input(
+            kosmadakis_params['gas_price_cent_kWh'] = st.number_input(
                 'Gaspreis [ct/kWh]',
                 min_value=0.0, max_value=200.0, step=0.5,
-                value=float(ss.get('gas_price_cent_kWh', 8.0)),
-                key='gas_price_cent_kWh'
+                key='gas_price_cent_kWh',
+                **_session_value_kwargs('gas_price_cent_kWh', 8.0)
             )
 
-            costcalcparams['gas_boiler_efficiency'] = st.number_input(
+            kosmadakis_params['gas_boiler_efficiency'] = st.number_input(
                 'Wirkungsgrad Ersatz-Gaskessel [-]',
                 min_value=0.1, max_value=1.0, step=0.01,
-                value=float(ss.get('gas_boiler_efficiency', 0.90)),
                 format='%.2f',
-                key='gas_boiler_efficiency'
+                key='gas_boiler_efficiency',
+                **_session_value_kwargs('gas_boiler_efficiency', 0.90)
             )
 
-            costcalcparams['refrigerant_charge_kg'] = st.number_input(
+            kosmadakis_params['refrigerant_charge_kg'] = st.number_input(
                 'Kältemittelfüllmenge gesamt [kg]',
                 min_value=0.0, max_value=100000.0, step=1.0,
-                value=float(ss.get('refrigerant_charge_kg', 0.0)),
-                key='refrigerant_charge_kg'
+                key='refrigerant_charge_kg',
+                **_session_value_kwargs('refrigerant_charge_kg', 0.0)
+            )
+
+            kosmadakis_params['refrigerant_price_eur_kg'] = st.number_input(
+                'Kältemittelpreis [€/kg]',
+                min_value=0.0, max_value=10000.0, step=1.0,
+                key='refrigerant_price_eur_kg',
+                **_session_value_kwargs('refrigerant_price_eur_kg', 50.0)
+            )
+
+            kosmadakis_params['kos_piping_factor'] = st.number_input(
+                'Faktor Rohrleitungen C_p-t / PEC [-]',
+                min_value=0.0, max_value=10.0, step=0.01,
+                format='%.2f',
+                key='kos_piping_factor',
+                **_session_value_kwargs('kos_piping_factor', 0.10)
+            )
+
+            kosmadakis_params['kos_electrical_factor'] = st.number_input(
+                'Faktor elektrische Installation C_el^CI / PEC [-]',
+                min_value=0.0, max_value=10.0, step=0.01,
+                format='%.2f',
+                key='kos_electrical_factor',
+                **_session_value_kwargs('kos_electrical_factor', 0.10)
+            )
+
+            kosmadakis_params['kos_project_factor'] = st.number_input(
+                'Projektkostenfaktor [-]',
+                min_value=0.0, max_value=50.0, step=0.1,
+                format='%.2f',
+                key='kos_project_factor',
+                **_session_value_kwargs('kos_project_factor', 4.16)
+            )
+
+            kosmadakis_params['kos_om_factor'] = st.number_input(
+                'O&M-Faktor Projektkosten [-]',
+                min_value=0.0, max_value=1.0, step=0.005,
+                format='%.3f',
+                key='kos_om_factor',
+                **_session_value_kwargs('kos_om_factor', 0.02)
+            )
+
+            kosmadakis_params['kos_discount_rate'] = st.number_input(
+                'Diskontsatz Amortisationszeit [-]',
+                min_value=0.0, max_value=1.0, step=0.005,
+                format='%.3f',
+                key='kos_discount_rate',
+                **_session_value_kwargs('kos_discount_rate', 0.05)
             )
 
         ss.costcalcparams = dict(costcalcparams)
+        ss.kosmadakis_params = dict(kosmadakis_params)
+        ss.econ_ui_params = {
+            'i_eff': float(ss.get('i_eff', 0.08)),
+            'r_n': float(ss.get('r_n', 0.02)),
+            'r_n_om': float(ss.get('r_n_om', ss.get('r_n', 0.02))),
+            'r_n_el': float(ss.get('r_n_el', ss.get('r_n', 0.02))),
+            'n': int(ss.get('n', 20)),
+            'omc_rel': float(ss.get('omc_rel', 0.03)),
+            'tci_factor': float(ss.get('tci_factor', 6.32)),
+            'install_factor': float(ss.get('install_factor', 4.16)),
+        }
         ss.hp_params = params
 
         run_sim = st.button('🧮 Auslegung ausführen')
@@ -1284,27 +2967,15 @@ if mode == 'Auslegung':
 
         with col_left:
             st.subheader('Topologie')
-
-            if is_dark:
-                try:
-                    top_file = os.path.join(
-                        src_path, 'img', 'topologies',
-                        f'hp_{hp_model_name_topology}_dark.svg'
-                        )
-                    st.image(top_file)
-                except:
-                    top_file = os.path.join(
-                        src_path, 'img', 'topologies',
-                        f'hp_{hp_model_name_topology}.svg'
-                        )
-                    st.image(top_file)
-
-            else:
-                top_file = os.path.join(
-                    src_path, 'img', 'topologies',
-                    f'hp_{hp_model_name_topology}.svg'
-                    )
+            top_file = resolve_topology_svg_path(
+                src_path,
+                hp_model_name_topology,
+                is_dark=is_dark,
+            )
+            if top_file is not None:
                 st.image(top_file)
+            else:
+                st.info('Keine statische Topologie-SVG fuer dieses Modell vorhanden.')
 
         with col_right:
             st.subheader('Kältemittel')
@@ -1357,23 +3028,26 @@ if mode == 'Auslegung':
                 """
                 )
 
-    if run_sim:
+    if run_sim or 'hp' in ss:
         # %% Run Design Simulation
-        with st.spinner('Simulation wird durchgeführt...'):
-            try:
-                ss.hp = run_design(hp_model_name, params)
-                sim_succeded = True
-                st.success(
-                    'Die Simulation der Wärmepumpenauslegung war erfolgreich.'
-                    )
-            except (ValueError, RuntimeError) as e:
-                sim_succeded = False
-                print(f'ValueError: {e}')
-                st.error(
-                    'Bei der Simulation der Wärmepumpe ist der nachfolgende '
-                    + 'Fehler aufgetreten. Bitte korrigieren Sie die '
-                    + f'Eingangsparameter und versuchen es erneut.\n\n"{e}"'
-                    )
+        if run_sim:
+            with st.spinner('Simulation wird durchgeführt...'):
+                try:
+                    ss.hp = run_design(hp_model_name, params)
+                    sim_succeded = True
+                    st.success(
+                        'Die Simulation der Wärmepumpenauslegung war erfolgreich.'
+                        )
+                except (ValueError, RuntimeError) as e:
+                    sim_succeded = False
+                    print(f'ValueError: {e}')
+                    st.error(
+                        'Bei der Simulation der Wärmepumpe ist der nachfolgende '
+                        + 'Fehler aufgetreten. Bitte korrigieren Sie die '
+                        + f'Eingangsparameter und versuchen es erneut.\n\n"{e}"'
+                        )
+        else:
+            sim_succeded = 'hp' in ss
 
         # %% MARK: Results
         if sim_succeded:
@@ -1441,23 +3115,213 @@ if mode == 'Auslegung':
                 # Heat extracted at evaporator (W → MW)
                 Q_dot_zu = abs(ss.hp.comps['evap'].Q.val) / 1e6
                 col4.metric('Q̇_zu (thermisch)', f"{Q_dot_zu:.2f} MW")
+
+                def _fmt_metric(value, unit='', scale=1.0, digits=2, percent=False):
+                    try:
+                        value = float(value)
+                    except Exception:
+                        return '—'
+                    if not np.isfinite(value):
+                        return '—'
+                    if percent:
+                        return f"{value * 100:.{digits}f} %"
+                    return f"{value / scale:.{digits}f} {unit}".strip()
+
+                show_extra_cop_definitions = hp_model_name in {
+                    'cascade', 'cascade_2ihx', 'cascade_mbhx'
+                }
+                if show_extra_cop_definitions and hasattr(ss.hp, 'get_power_cop_metrics'):
+                    power_metrics = ss.hp.get_power_cop_metrics()
+                    with st.expander('Zusätzliche COP-Definitionen', expanded=False):
+                        cop_row = st.columns(4)
+                        cop_row[0].metric(
+                            'COP gesamt',
+                            _fmt_metric(power_metrics.get('cop_total'))
+                        )
+                        cop_row[1].metric(
+                            'COP nur Verdichter elektrisch',
+                            _fmt_metric(power_metrics.get('cop_comp_el'))
+                        )
+                        cop_row[2].metric(
+                            'COP nur Verdichter mechanisch',
+                            _fmt_metric(power_metrics.get('cop_comp_mech'))
+                        )
+                        cop_row[3].metric(
+                            'P_aux elektrisch',
+                            _fmt_metric(
+                                power_metrics.get('P_aux_el_W'),
+                                unit='kW', scale=1e3
+                            )
+                        )
+
+                        st.caption(
+                            'Der Standard-COP des Dashboards nutzt die gesamte '
+                            + 'elektrische Aufnahme. Die zusätzlichen Kennzahlen '
+                            + 'trennen Verdichterleistung und Hilfsantriebe für '
+                            + 'einen besseren Literaturvergleich.'
+                        )
+
+                calibration_result = getattr(ss.hp, 'calibration_result', None)
+                if calibration_result and calibration_result.get('mode') == 'a_target':
+                    with st.expander('Literatur-Kalibrierung', expanded=False):
+                        cal_row = st.columns(4)
+                        cal_row[0].metric(
+                            'A_target',
+                            _fmt_metric(calibration_result.get('target_A'), digits=3)
+                        )
+                        cal_row[1].metric(
+                            'A erreicht',
+                            _fmt_metric(calibration_result.get('achieved_A'), digits=3)
+                        )
+                        cal_row[2].metric(
+                            'RIP gefunden',
+                            _fmt_metric(calibration_result.get('rip_factor'), digits=3)
+                        )
+
+                        delta_a = np.nan
+                        target_a = calibration_result.get('target_A')
+                        achieved_a = calibration_result.get('achieved_A')
+                        if target_a is not None and achieved_a is not None:
+                            delta_a = float(achieved_a) - float(target_a)
+                        cal_row[3].metric('ΔA', _fmt_metric(delta_a, digits=3))
+
+                        if calibration_result.get('matched'):
+                            st.caption(
+                                'Der Zielwert für den Einspritzmassenanteil wurde '
+                                + 'innerhalb der Kalibrierungstoleranz getroffen.'
+                            )
+                        else:
+                            st.warning(
+                                'A_target konnte nur näherungsweise erreicht '
+                                + 'werden. Das Modell verwendet den besten stabilen '
+                                + 'RIP-Wert aus der Kalibrierung.'
+                            )
+
+                if hasattr(ss.hp, 'get_injection_metrics'):
+                    injection = ss.hp.get_injection_metrics()
+                    if np.isfinite(injection.get('A_inj', np.nan)):
+                        with st.expander('Injektionskennzahlen', expanded=False):
+                            inj_row = st.columns(4)
+                            inj_row[0].metric(
+                                'A_inj',
+                                _fmt_metric(injection.get('A_inj'), digits=3)
+                            )
+                            inj_row[1].metric(
+                                'ṁ_main',
+                                _fmt_metric(
+                                    injection.get('m_main_kg_s'), unit='kg/s'
+                                )
+                            )
+                            inj_row[2].metric(
+                                'ṁ_inj',
+                                _fmt_metric(
+                                    injection.get('m_inj_kg_s'), unit='kg/s'
+                                )
+                            )
+                            inj_row[3].metric(
+                                'ΔT_sup,inj',
+                                _fmt_metric(
+                                    injection.get('dT_sup_inj_K'), unit='K'
+                                )
+                            )
+
+                            st.caption(
+                                f"{injection.get('branch_type', 'Injektionszweig')}: "
+                                + 'Der Einspritzmassenanteil A_inj wird relativ zum '
+                                + 'Hauptmassenstrom des Niederdruckverdichters angegeben.'
+                            )
+
+                if hp_model['nr_refrigs'] == 2 and hasattr(ss.hp, 'get_cycle_split_metrics'):
+                    split = ss.hp.get_cycle_split_metrics()
+
+                    with st.expander('Kaskadenaufteilung', expanded=True):
+                        split_row1 = st.columns(4)
+                        split_row1[0].metric(
+                            'T_mid',
+                            _fmt_metric(split.get('T_mid_C'), unit='°C')
+                        )
+                        split_row1[1].metric(
+                            'Splitfaktor α',
+                            _fmt_metric(split.get('t_mid_fraction'), digits=3)
+                        )
+                        split_row1[2].metric(
+                            'ṁ_NTK',
+                            _fmt_metric(split.get('m_lt_kg_s'), unit='kg/s')
+                        )
+                        split_row1[3].metric(
+                            'ṁ_HTK',
+                            _fmt_metric(split.get('m_ht_kg_s'), unit='kg/s')
+                        )
+
+                        split_row2 = st.columns(4)
+                        split_row2[0].metric(
+                            'P_NTK',
+                            _fmt_metric(split.get('P_lt_W'), unit='MW', scale=1e6)
+                        )
+                        split_row2[1].metric(
+                            'P_HTK',
+                            _fmt_metric(split.get('P_ht_W'), unit='MW', scale=1e6)
+                        )
+                        split_row2[2].metric(
+                            'NTK-Anteil Verdichterleistung',
+                            _fmt_metric(
+                                split.get('power_share_lt'), percent=True, digits=1
+                            )
+                        )
+                        split_row2[3].metric(
+                            'HTK-Anteil Verdichterleistung',
+                            _fmt_metric(
+                                split.get('power_share_ht'), percent=True, digits=1
+                            )
+                        )
+
+                        st.caption(
+                            'Die Kreisaufteilung wird aus den gelösten '
+                            + 'Zirkulationsmassenströmen und '
+                            + 'Verdichterleistungen berechnet. '
+                            + f"ṁ_HTK / ṁ_NTK = {_fmt_metric(split.get('m_ht_to_lt'), digits=3)}."
+                        )
+
+                        split_row3 = st.columns(4)
+                        split_row3[0].metric(
+                            'Q̇_NTK->ZWÜ',
+                            _fmt_metric(split.get('Q_lt_W'), unit='MW', scale=1e6)
+                        )
+                        split_row3[1].metric(
+                            'Q̇_HTK,ab',
+                            _fmt_metric(split.get('Q_ht_W'), unit='MW', scale=1e6)
+                        )
+                        split_row3[2].metric(
+                            'NTK-Kennzahl*',
+                            _fmt_metric(split.get('cop_lt'), digits=2)
+                        )
+                        split_row3[3].metric(
+                            'HTK-Kennzahl*',
+                            _fmt_metric(split.get('cop_ht'), digits=2)
+                        )
+
+                        st.caption(
+                            '* Teilprozess-Kennzahlen, keine separaten '
+                            + 'Gesamt-COPs: NTK* = Q̇_NTK->ZWÜ / P_NTK und '
+                            + 'HTK* = Q̇_HTK,ab / P_HTK. Der HTK-Wert kann '
+                            + 'vergleichsweise groß werden, weil seine '
+                            + 'Nutzwärme bereits die aus dem NTK '
+                            + 'übertragene Wärme enthält. Die Werte sind '
+                            + 'nicht direkt zum Gesamt-COP addierbar.'
+                        )
+
                 with st.expander('Topologie & Kältemittel'):
                     # %% Topology & Refrigerant
                     col_left, col_right = st.columns([1, 4])
 
                     with col_left:
                         st.subheader("Topologie")
-                        top_file = os.path.join(
-                            src_path, "img", "topologies",
-                            f"hp_{hp_model_name_topology}_label.svg"
+                        top_file = resolve_topology_svg_path(
+                            src_path,
+                            hp_model_name_topology,
+                            is_dark=is_dark,
+                            labeled=True,
                         )
-                        if is_dark:
-                            top_file_dark = os.path.join(
-                                src_path, "img", "topologies",
-                                f"hp_{hp_model_name_topology}_label_dark.svg"
-                            )
-                            if os.path.exists(top_file_dark):
-                                top_file = top_file_dark
 
                         topo_col_left, topo_col_right = st.columns(2)
                         theme = "dark" if is_dark else "light"
@@ -1474,8 +3338,11 @@ if mode == 'Auslegung':
 
                         with topo_col_right:
                             st.markdown("**original**")
-                            st.image(top_file)
-                            st.caption("Vorlage aus `img/topologies`")
+                            if top_file is not None:
+                                st.image(top_file)
+                                st.caption("Vorlage aus `img/topologies`")
+                            else:
+                                st.info("Keine statische Vorlage fuer dieses Modell vorhanden.")
 
 
 
@@ -1759,7 +3626,11 @@ if mode == 'Auslegung':
                 exergoecon_container = st.container()
 
                 with exergoecon_container.expander('Ökonomische / Exergoökonomische Bewertung', expanded=True):
-                    costcalcparams = dict(ss.get('costcalcparams', costcalcparams))
+                    # Use the live widget values from this run as the source of
+                    # truth. Re-reading the cached dict from session state can
+                    # lag behind preset changes and overwrite the current UI
+                    # values with stale data.
+                    costcalcparams = dict(costcalcparams)
                     elec_price_cent_kWh = float(costcalcparams.get('elec_price_cent_kWh', 40.0))
                     tau_h_per_year = float(costcalcparams.get('tau_h_per_year', 5500.0))
 
@@ -1775,17 +3646,25 @@ if mode == 'Auslegung':
                     ref_year = "2015" if "2015" in _cepci else min(_cepci.keys())
                     CEPCI_cur = float(_cepci[str(costcalcparams['current_year'])])
                     CEPCI_ref = float(_cepci[str(ref_year)])
+                    cost_method = str(costcalcparams.get('cost_method', 'standard'))
+                    repo_cost_mode = cost_method == 'repo_hthp'
 
                     # ===============================
                     # CAPEX / OPEX (NO exergy here)
                     # ===============================
-                    PEC, TCI, Z = build_costs(
+                    PEC, TCI, Z, cost_diag = build_costs(
                         None, ss.hp,
+                        cost_method=cost_method,
+                        return_diagnostics=True,
+                        hx_area_method=str(costcalcparams.get('hx_area_method', 'q_lmtd')),
+                        compressor_eta_vol=float(costcalcparams.get('compressor_eta_vol', 1.0)),
+                        compressor_eta_vol_lt=float(costcalcparams.get('compressor_eta_vol_lt', costcalcparams.get('compressor_eta_vol', 1.0))),
+                        compressor_eta_vol_ht=float(costcalcparams.get('compressor_eta_vol_ht', costcalcparams.get('compressor_eta_vol', 1.0))),
                         CEPCI_cur=CEPCI_cur,
                         CEPCI_ref=CEPCI_ref,
                         k_evap=float(costcalcparams.get('k_evap', 1500.0)),
                         k_cond=float(costcalcparams.get('k_cond', 3500.0)),
-                        k_inter=2200.0,
+                        k_inter=float(costcalcparams.get('k_inter', 2200.0)),
                         k_trans=float(costcalcparams.get('k_trans', 60.0)) if 'trans' in hp_model_name else 60.0,
                         k_econ=1500.0,
                         k_misc=float(costcalcparams.get('k_misc', 50.0)),
@@ -1794,19 +3673,24 @@ if mode == 'Auslegung':
                         compressor_cost_model=costcalcparams.get('compressor_cost_model', 'ommen'),
                         flash_cost_model=costcalcparams.get('flash_cost_model', 'ommen'),
                         flash_residence_time_s=float(costcalcparams.get('residence_time', 10.0)),
-                        tci_factor=6.32,
-                        omc_rel=0.03,
-                        i_eff=0.08,
-                        r_n=0.02,
-                        n=20,
+                        cost_index_year=int(costcalcparams.get('current_year', 2025)),
+                        analysis_year=int(costcalcparams.get('analysis_year', costcalcparams.get('current_year', 2025))),
+                        install_factor=float(ss.get('install_factor', 4.16)),
+                        include_pumps_in_pec=bool(costcalcparams.get('include_pumps_in_pec', True)),
+                        tci_factor=float(ss.get('tci_factor', 6.32)),
+                        omc_rel=float(ss.get('omc_rel', 0.03)),
+                        i_eff=float(ss.get('i_eff', 0.08)),
+                        r_n=float(ss.get('r_n', 0.02)),
+                        r_n_om=float(ss.get('r_n_om', ss.get('r_n', 0.02))),
+                        n=int(ss.get('n', 20)),
                         tau_h_per_year=float(tau_h_per_year)
                     )
 
                     pec_total = float(sum(PEC.values()))
                     capex_total = float(sum(TCI.values()))
                     col1, col2, col3 = st.columns(3)
-                    col1.metric('Komponentenkosten (PEC)', f"{pec_total:,.0f} €")
-                    col2.metric('Gesamtinvestitionskosten (TCI)', f"{capex_total:,.0f} €")
+                    col1.metric('PEC', f"{pec_total:,.0f} €")
+                    col2.metric('TCI', f"{capex_total:,.0f} €")
                     try:
                         Q_out_W = getattr(ss.hp, 'Q_out', None)
                         if Q_out_W is None or (isinstance(Q_out_W, float) and np.isnan(Q_out_W)):
@@ -1825,10 +3709,29 @@ if mode == 'Auslegung':
                         use_container_width=True,
                         hide_index=True
                     )
-                    st.caption(
-                        "Mit i_eff = 8 %, r_n = 2 %, n = 20 Jahren, "
-                        "f_O&M = 3 % und τ_h = Volllaststunden pro Jahr."
-                    )
+                    if repo_cost_mode:
+                        st.caption(
+                            f"Mit F_install = {float(ss.get('install_factor', 4.16)):.2f}, "
+                            + f"CEPCI-Jahr {costcalcparams['current_year']} → Analysejahr "
+                            + f"{int(costcalcparams.get('analysis_year', costcalcparams['current_year']))}, "
+                            + f"R_N_OM = {float(ss.get('r_n_om', ss.get('r_n', 0.02))) * 100:.1f} %, "
+                            + f"R_N_EL = {float(ss.get('r_n_el', ss.get('r_n', 0.02))) * 100:.1f} %, "
+                            + f"HX-Ansatz = {('TESPy kA / U' if costcalcparams.get('hx_area_method') == 'tespy_ka' else 'Q / (U * LMTD)')}, "
+                            + f"η_vol,LT = {float(costcalcparams.get('compressor_eta_vol_lt', costcalcparams.get('compressor_eta_vol', 1.0))):.2f}, "
+                            + f"η_vol,HT = {float(costcalcparams.get('compressor_eta_vol_ht', costcalcparams.get('compressor_eta_vol', 1.0))):.2f}, "
+                            + f"i_eff = {float(ss.get('i_eff', 0.08)) * 100:.1f} %, "
+                            + f"n = {int(ss.get('n', 20))} Jahren, "
+                            + f"f_O&M = {float(ss.get('omc_rel', 0.03)) * 100:.1f} % "
+                            + "und τ_h = Volllaststunden pro Jahr."
+                        )
+                    else:
+                        st.caption(
+                            f"Mit i_eff = {float(ss.get('i_eff', 0.08)) * 100:.1f} %, "
+                            + f"r_n = {float(ss.get('r_n', 0.02)) * 100:.1f} %, "
+                            + f"n = {int(ss.get('n', 20))} Jahren, "
+                            + f"f_O&M = {float(ss.get('omc_rel', 0.03)) * 100:.1f} % "
+                            + "und τ_h = Volllaststunden pro Jahr."
+                        )
 
                     st.markdown("**Kostenaufschlüsselung (PEC)**")
                     st.dataframe(
@@ -1852,6 +3755,45 @@ if mode == 'Auslegung':
                         .sort_values("Z [EUR/h]", ascending=False),
                         use_container_width=True,
                         hide_index=True
+                    )
+
+                    if repo_cost_mode and cost_diag:
+                        cost_diag_df = pd.DataFrame(cost_diag)
+
+                    st.markdown("### Projektkostenabschätzung nach Kosmadakis et al. (2020)")
+                    kos_rows = build_kosmadakis_project_cost_df(
+                        hp=ss.hp,
+                        PEC=PEC,
+                        kosmadakis_params=ss.get('kosmadakis_params', {}),
+                        elec_price_cent_kWh=elec_price_cent_kWh,
+                        tau_h_per_year=tau_h_per_year,
+                    )
+                    kos_values = kos_rows.set_index("Größe")["Wert"]
+                    C_project = float(kos_values.get("C_project", np.nan))
+                    E_s = float(kos_values.get("E_s", np.nan))
+                    PBP = float(kos_values.get("PBP", np.nan))
+
+                    kc1, kc2, kc3 = st.columns(3)
+                    kc1.metric(
+                        "C_project",
+                        "—" if np.isnan(C_project) else f"{C_project:,.0f} €"
+                    )
+                    kc2.metric(
+                        "E_s",
+                        "—" if np.isnan(E_s) else f"{E_s:,.0f} €/a"
+                    )
+                    kc3.metric(
+                        "PBP",
+                        "—" if np.isnan(PBP) else f"{PBP:,.2f} a"
+                    )
+
+                    st.dataframe(
+                        kos_rows.style.format({"Wert": "{:,.2f}"}),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                    st.caption(
+                        "Dieser Block ist eine eigenständige Projektkostenabschätzung."
                     )
 
                     # ===============================
@@ -1893,11 +3835,14 @@ if mode == 'Auslegung':
                     pamb_Pa = float(params["ambient"]["p"]) * 1e5
 
                     econ_params = dict(
-                        i_eff=0.08,
-                        r_n=0.02,
-                        n=20,
-                        omc_rel=0.03,
-                        tci_factor=6.32
+                        i_eff=float(ss.get('i_eff', 0.08)),
+                        r_n=float(ss.get('r_n', 0.02)),
+                        r_n_om=float(ss.get('r_n_om', ss.get('r_n', 0.02))),
+                        r_n_el=float(ss.get('r_n_el', ss.get('r_n', 0.02))),
+                        n=int(ss.get('n', 20)),
+                        omc_rel=float(ss.get('omc_rel', 0.03)),
+                        tci_factor=float(ss.get('tci_factor', 6.32)),
+                        install_factor=float(ss.get('install_factor', 4.16)),
                     )
 
                     # ===============================
@@ -1927,6 +3872,13 @@ if mode == 'Auslegung':
                             print(df_execo_comp.to_string())
                             print("="*80 + "\n")
                         st.success("✅ Exergoökonomische Analyse erfolgreich.")
+                        if getattr(ean, "used_allow_singular_exergoeconomics", False):
+                            st.info(
+                                "Hinweis: Die exergoökonomische Gleichungsmatrix "
+                                + "war singulär. ExerPy wurde daher mit "
+                                + "`allow_singular=True` im Least-Squares-Modus "
+                                + "fortgesetzt."
+                            )
                     except Exception as exc:
                         import traceback
                         st.error(f"❌ Exergoökonomische Analyse fehlgeschlagen:\n{exc}")
@@ -1949,100 +3901,83 @@ if mode == 'Auslegung':
                         if df_execo_eval is not None:
                             if "Component" not in df_execo_eval.columns:
                                 df_execo_eval = df_execo_eval.reset_index().rename(columns={"index": "Component"})
-                            st.markdown("**Bewertung der wichtigsten Komponenten (`evaluate_results`)**")
+                            st.markdown("**Komponentenranking (`evaluate_results`)**")
                             st.dataframe(st_safe_df(df_execo_eval), use_container_width=True, hide_index=True)
 
-                        st.markdown("### Projektkostenabschätzung nach Kosmadakis et al. (2020)")
-                        comp_by_label = {comp.label: comp for comp in ss.hp.comps.values()}
-
-                        def _component_class(label):
-                            comp = comp_by_label.get(label)
-                            return comp.__class__.__name__ if comp is not None else ""
-
-                        def _is_hex_label(label):
-                            cls = _component_class(label)
-                            return cls in {"Condenser", "HeatExchanger", "SimpleHeatExchanger", "DropletSeparator"}
-
-                        def _is_comp_label(label):
-                            return _component_class(label) == "Compressor"
-
-                        def _is_flash_label(label):
-                            cls = _component_class(label)
-                            return cls == "Drum" or "flash" in str(label).lower()
-
-                        pec_hex_sum = float(sum(val for lbl, val in PEC.items() if _is_hex_label(lbl)))
-                        pec_comp_sum = float(sum(val for lbl, val in PEC.items() if _is_comp_label(lbl)))
-                        pec_flash_sum = float(sum(val for lbl, val in PEC.items() if _is_flash_label(lbl)))
-                        base_equipment_cost = pec_hex_sum + pec_comp_sum + pec_flash_sum
-
-                        refrigerant_charge_kg = float(costcalcparams.get('refrigerant_charge_kg', 0.0))
-                        gas_price_cent_kWh = float(costcalcparams.get('gas_price_cent_kWh', 8.0))
-                        gas_boiler_efficiency = max(float(costcalcparams.get('gas_boiler_efficiency', 0.90)), 1e-9)
-
-                        C_p_t = 0.10 * base_equipment_cost
-                        C_el_CI = 0.10 * base_equipment_cost
-                        C_refrigerant = 50.0 * refrigerant_charge_kg
-                        C_total_kos = base_equipment_cost + C_refrigerant + C_p_t + C_el_CI
-                        C_project = 4.16 * C_total_kos
-
-                        try:
-                            Q_out_W = getattr(ss.hp, 'Q_out', None)
-                            if Q_out_W is None or (isinstance(Q_out_W, float) and np.isnan(Q_out_W)):
-                                if hasattr(ss.hp, '_get_heat_output_W'):
-                                    Q_out_W = ss.hp._get_heat_output_W()
-                                else:
-                                    Q_out_W = ss.hp.comps['cons'].Q.val
-                            annual_heat_kWh = abs(float(Q_out_W)) / 1e3 * float(tau_h_per_year)
-                        except Exception:
-                            annual_heat_kWh = 0.0
-
-                        try:
-                            annual_el_kWh = abs(float(ss.hp.conns['E0'].E.val)) / 1e3 * float(tau_h_per_year)
-                        except Exception:
-                            annual_el_kWh = 0.0
-
-                        gas_price_eur_kWh = gas_price_cent_kWh / 100.0
-                        elec_price_eur_kWh = float(elec_price_cent_kWh) / 100.0
-                        C_g = annual_heat_kWh * gas_price_eur_kWh / gas_boiler_efficiency
-                        C_el_OP = annual_el_kWh * elec_price_eur_kWh
-                        C_O_and_M_project = 0.02 * C_project
-                        E_s = C_g - C_el_OP - C_O_and_M_project
-                        r_discount = 0.05
-
-                        if E_s > C_project and (1.0 - C_project / E_s) > 0.0:
-                            PBP = np.log(1.0 / (1.0 - C_project / E_s)) / np.log(1.0 + r_discount)
-                        else:
-                            PBP = np.nan
-
-                        kc1, kc2, kc3 = st.columns(3)
-                        kc1.metric("C_project", f"{C_project:,.0f} €")
-                        kc2.metric("E_s", f"{E_s:,.0f} €/a")
-                        kc3.metric("PBP", "—" if np.isnan(PBP) else f"{PBP:,.2f} a")
-
-                        kos_rows = pd.DataFrame([
-                            {"Größe": "Σ PEC_HEX", "Wert": pec_hex_sum},
-                            {"Größe": "Σ PEC_compressor", "Wert": pec_comp_sum},
-                            {"Größe": "PEC_flashtank", "Wert": pec_flash_sum},
-                            {"Größe": "C_p-t", "Wert": C_p_t},
-                            {"Größe": "C_el^CI", "Wert": C_el_CI},
-                            {"Größe": "C_refrigerant", "Wert": C_refrigerant},
-                            {"Größe": "C_gesamt", "Wert": C_total_kos},
-                            {"Größe": "C_project", "Wert": C_project},
-                            {"Größe": "C_g", "Wert": C_g},
-                            {"Größe": "C_el^OP", "Wert": C_el_OP},
-                            {"Größe": "C_O&M", "Wert": C_O_and_M_project},
-                            {"Größe": "E_s", "Wert": E_s},
-                        ])
-                        st.dataframe(
-                            kos_rows.style.format({"Wert": "{:,.2f}"}),
-                            use_container_width=True,
-                            hide_index=True
+                        summary_df = pd.DataFrame([{
+                            "COP": getattr(ss.hp, "cop", np.nan),
+                            "epsilon": getattr(ss.hp, "epsilon", np.nan),
+                            "E_F [MW]": float(getattr(ss.hp, "E_F", np.nan)) / 1e6,
+                            "E_P [MW]": float(getattr(ss.hp, "E_P", np.nan)) / 1e6,
+                            "E_D [MW]": float(getattr(ss.hp, "E_D", np.nan)) / 1e6,
+                            "E_L [MW]": float(getattr(ss.hp, "E_L", np.nan)) / 1e6,
+                            "PEC_total [EUR]": pec_total,
+                            "TCI_total [EUR]": capex_total,
+                            "Z_total [EUR/h]": float(sum(Z.values())),
+                        }])
+                        pec_df = pd.DataFrame({
+                            "Component": list(PEC.keys()),
+                            "PEC [EUR]": list(PEC.values())
+                        }).sort_values("PEC [EUR]", ascending=False)
+                        tci_df = pd.DataFrame({
+                            "Component": list(TCI.keys()),
+                            "TCI [EUR]": list(TCI.values())
+                        }).sort_values("TCI [EUR]", ascending=False)
+                        z_df = pd.DataFrame({
+                            "Component": list(Z.keys()),
+                            "Z [EUR/h]": list(Z.values())
+                        }).sort_values("Z [EUR/h]", ascending=False)
+                        cost_diag_df = pd.DataFrame(cost_diag) if cost_diag else pd.DataFrame()
+                        exergy_export_df = getattr(ss.hp, "component_exergy_df", None)
+                        if exergy_export_df is None and ean is not None:
+                            try:
+                                exergy_export_df, _, _ = ean.exergy_results(print_results=False)
+                            except Exception:
+                                exergy_export_df = pd.DataFrame()
+                        elif exergy_export_df is None:
+                            exergy_export_df = pd.DataFrame()
+                        selected_params_export_df = build_selected_params_df(
+                            params=params,
+                            hp_model=hp_model,
+                            base_topology=base_topology,
+                            model_name=model_name,
+                            process_type=process_type
                         )
-                        st.caption(
-                            "Zusätzliche Annahmen für diesen Block: Gaspreis und Ersatz-Gaskesselwirkungsgrad "
-                            "sowie die gesamte Kältemittelfüllmenge sind Nutzereingaben. "
-                            "Der Diskontsatz für PBP ist fest auf 5 % gesetzt. "
-                            "Wenn E_s ≤ C_project, wird keine endliche diskontierte Amortisationszeit ausgewiesen."
+                        literature_metrics_export_df = build_literature_metrics_export_df(
+                            hp=ss.hp,
+                            hp_model_name=hp_model_name
+                        )
+                        reference_internal_export_df = build_reference_internal_states_export_df(
+                            hp=ss.hp,
+                            params=params
+                        )
+                        export_sheets = {
+                            "selected_inputs": selected_params_export_df,
+                            "summary": summary_df,
+                            "exergy_components": exergy_export_df,
+                            "exergoeconomic_components": df_execo_comp,
+                            "evaluate_results": df_execo_eval if df_execo_eval is not None else pd.DataFrame(),
+                            "PEC": pec_df,
+                            "TCI": tci_df,
+                            "Z": z_df,
+                            "Kosmadakis_project_cost": kos_rows,
+                        }
+                        if not cost_diag_df.empty:
+                            export_sheets["cost_diagnostics"] = cost_diag_df
+                        if not literature_metrics_export_df.empty:
+                            export_sheets["Topologiespezifische Kennzahl"] = (
+                                literature_metrics_export_df
+                            )
+                        if not reference_internal_export_df.empty:
+                            export_sheets["Referenzvergleich intern"] = (
+                                reference_internal_export_df
+                            )
+                        export_bytes = _build_excel_xml_workbook(export_sheets)
+                        st.download_button(
+                            "Analyse-Export herunterladen",
+                            data=export_bytes,
+                            file_name="exergoeconomic_analysis_export.xls",
+                            mime="application/vnd.ms-excel"
                         )
 
 
@@ -2242,17 +4177,14 @@ if mode == 'Auslegung':
                         except Exception as e:
                             st.info(f"Wasserfall ausgelassen: {e}")
 
-                st.write(
-                    """
-                    Definitionen und Methodik der Exergieanalyse basierend auf
-                    [Morosuk und Tsatsaronis (2019)](https://doi.org/10.1016/j.energy.2018.10.090),
-                    dessen Implementation in TESPy beschrieben in [Witte und Hofmann et al. (2022)](https://doi.org/10.3390/en15114087)
-                    und didaktisch aufbereitet in [Witte, Freißmann und Fritz (2023)](https://fwitte.github.io/TESPy_teaching_exergy/).
-                    """
-                )
-
-                st.info('Um die Teillast zu berechnen, drücke auf "Teillast simulieren".')
-                st.button('Teillast simulieren', on_click=switch2partload)
+                partload_reason = None
+                if hasattr(ss.hp, 'get_partload_mode_reason'):
+                    partload_reason = ss.hp.get_partload_mode_reason()
+                if partload_reason:
+                    st.info(partload_reason)
+                else:
+                    st.info('Um die Teillast zu berechnen, drücke auf "Teillast simulieren".')
+                    st.button('Teillast simulieren', on_click=switch2partload)
 
 if mode == 'Teillast':
     # %% MARK: Offdesign Simulation
@@ -2267,6 +4199,13 @@ if mode == 'Teillast':
             '''
         )
     else:
+        if (
+            hasattr(ss.hp, 'supports_partload_boundary_modes')
+            and not ss.hp.supports_partload_boundary_modes()
+        ):
+            st.warning(ss.hp.get_partload_mode_reason())
+            st.stop()
+
         if not run_pl_sim and 'partload_char' not in ss:
             # %% Landing Page
             st.write(

@@ -4,7 +4,7 @@ import os
 import logging
 import io
 from contextlib import redirect_stdout
-from exerpy import ExergyAnalysis, ExergoeconomicAnalysis
+from exerpy import EconomicAnalysis, ExergyAnalysis, ExergoeconomicAnalysis
 import numpy as np
 from collections.abc import MutableMapping
 import json
@@ -23,6 +23,11 @@ def _scalar(x):
             return np.nan
         x = x[-1]  # take last element for time-series-like inputs
     return x
+
+
+def _is_singular_exergoeconomic_error(err):
+    """Return whether an exception indicates a singular ExerPy cost system."""
+    return "singular" in str(err).lower()
 
 
 def _conn_temperature_C(hp, label, fallback=None):
@@ -73,8 +78,9 @@ def determine_exergy_boundaries(hp, source_tol_K=1.0):
     )
 
     fuel = {"inputs": ["E0"] if "E0" in conns else [], "outputs": []}
+    sink_out = "C3" if "C3" in conns else ("C2" if "C2" in conns else None)
     product = {
-        "inputs": [x for x in ("C3",) if x in conns],
+        "inputs": [sink_out] if sink_out is not None else [],
         "outputs": [x for x in ("C1",) if x in conns],
     }
     loss = {"inputs": [], "outputs": []}
@@ -712,6 +718,33 @@ def eur_per_GJ_from_cent_per_kWh(cent_per_kWh: float) -> float:
     # 1 kWh = 3.6 MJ, 1 GJ = 277.777... kWh
     return (cent_per_kWh / 100.0) * 277.7777777778
 
+
+def _repo_celf(r_n: float, i_eff: float = 0.08, n: int = 20) -> float:
+    """
+    End-of-year constant-escalation levelization factor used in the HTHP repo.
+
+    For r_n == i_eff, the limit simplifies to n / (1 + i_eff) * CRF.
+    """
+    n = max(1, int(n))
+    i_eff = float(i_eff)
+    r_n = float(r_n)
+    eps = 1e-12
+
+    if abs(i_eff) < eps:
+        crf = 1.0 / n
+    else:
+        denom = ((1.0 + i_eff) ** n) - 1.0
+        crf = (
+            i_eff * (1.0 + i_eff) ** n / denom
+            if abs(denom) > eps else 1.0 / n
+        )
+
+    k = (1.0 + r_n) / (1.0 + i_eff)
+    if abs(1.0 - k) < eps:
+        return (n / (1.0 + i_eff)) * crf
+
+    return ((1.0 - k ** n) / ((1.0 + i_eff) * (1.0 - k))) * crf
+
 def _is_non_material(conn) -> bool:
     """
     Return True for TESPy non-material/power connections.
@@ -770,12 +803,14 @@ def _lmtd_from_comp(comp, default=10.0):
         pass
     return _lmtd(Th_in, Th_out, Tc_in, Tc_out)
 
-def _k_for(label: str, *, k_evap, k_cond, k_inter, k_trans, k_econ, k_misc) -> float:
+def _k_for(label: str, *, k_evap, k_cond, k_inter, k_ihx, k_trans, k_econ, k_misc) -> float:
     L = (label or "").lower()
     if "trans" in L or "gaskühler" in L:
         return k_trans          # gas cooler / transcritical HEX
     if "economizer" in L or "econ" in L:
         return k_econ
+    if "internal heat exchanger" in L:
+        return k_ihx
     if "intermediate heat exchanger" in L or "condenser" in L or "inter" in L:
         return k_inter          # intermediate/condensing side between cycles
     if "evap" in L:
@@ -904,8 +939,14 @@ def build_exergo_boundaries(ean, hp):
 
 def build_costs(
     ean, hp, *,
+    cost_method="standard",
+    return_diagnostics=False,
+    hx_area_method="q_lmtd",
+    compressor_eta_vol=1.0,
+    compressor_eta_vol_lt=None,
+    compressor_eta_vol_ht=None,
     # default U-values [W/m²K]
-    k_evap=1500.0, k_cond=3500.0, k_inter=2200.0, k_trans=60.0, k_econ=1500.0, k_misc=50.0,
+    k_evap=1500.0, k_cond=3500.0, k_inter=2200.0, k_ihx=1500.0, k_trans=60.0, k_econ=1500.0, k_misc=50.0,
     # currency conversion for USD-based correlations
     usd_to_eur=0.93,
     # PEC correlation choices
@@ -920,8 +961,12 @@ def build_costs(
     flash_pressure_ref_bar=10.0,
     flash_pressure_exponent=0.0,
     flash_rho_default=1000.0,
+    cost_index_year=None,
+    analysis_year=None,
+    install_factor=4.16,
+    include_pumps_in_pec=True,
     CEPCI_cur=797.9, CEPCI_ref=556.8,
-    tci_factor=6.32, omc_rel=0.03, i_eff=0.08, r_n=0.02, n=20,
+    tci_factor=6.32, omc_rel=0.03, i_eff=0.08, r_n=0.02, r_n_om=None, n=20,
     tau_h_per_year=5500.0
 ):
     """
@@ -931,9 +976,13 @@ def build_costs(
       - Compressors: selectable inlet volumetric-flow or power-based correlation.
       - Pumps: cost the pump (not the motor); prefer hydraulic power; fallback to motor electric power.
       - Motors / valves / buses / sources / cycle closers / split/merge, etc.: Z = 0 (auxiliaries).
-      - Heat exchangers (Condenser, HeatExchanger, SimpleHeatExchanger, DropletSeparator/economizer):
-        A from Q/(k*LMTD), with selectable area-based cost correlation.
-      - CRF uses i_eff with escalation r_n.
+      - Heat exchangers (Condenser, HeatExchanger, SimpleHeatExchanger, DropletSeparator/economizer,
+        internal heat exchangers):
+        A from Q/(k*LMTD) or, in repo mode, optionally from TESPy kA/U.
+      - Standard mode: PEC -> TCI via tci_factor, Z via the local CRF logic.
+      - Repo mode: PEC from the selected equipment-cost correlation,
+        TCI after applying F_install, Z via exerpy.EconomicAnalysis
+        following the HTHP reference workflow.
       - Flash tank: selectable volume- or mass-flow-based correlation.
     """
     # Keep the global CEPCI_ref argument as backward-compatible fallback, but
@@ -942,14 +991,22 @@ def build_costs(
     SHAMOUSH_CEPCI_REF = 596.0
     DAI_CEPCI_REF = 555.0  # average of 2015/2016 values in the package data
 
+    r_n_om = float(r_n if r_n_om is None else r_n_om)
+    cost_index_year = int(cost_index_year) if cost_index_year is not None else None
+    analysis_year = int(analysis_year) if analysis_year is not None else cost_index_year
+    analysis_multiplier = 1.0
+    if cost_method == "repo_hthp" and cost_index_year is not None and analysis_year is not None:
+        analysis_multiplier = (1.0 + r_n_om) ** (analysis_year - cost_index_year)
+
     if compressor_cost_model.startswith("shamoushaki"):
         compressor_cepci = (CEPCI_cur / SHAMOUSH_CEPCI_REF) * usd_to_eur
     elif compressor_cost_model == "ommen":
         compressor_cepci = CEPCI_cur / OMMEN_CEPCI_REF
     else:
         compressor_cepci = CEPCI_cur / CEPCI_ref
+    compressor_cepci *= analysis_multiplier
 
-    pump_cepci = (CEPCI_cur / SHAMOUSH_CEPCI_REF) * usd_to_eur
+    pump_cepci = (CEPCI_cur / SHAMOUSH_CEPCI_REF) * usd_to_eur * analysis_multiplier
 
     if hex_cost_model.startswith("shamoushaki"):
         hex_cepci = (CEPCI_cur / SHAMOUSH_CEPCI_REF) * usd_to_eur
@@ -959,6 +1016,7 @@ def build_costs(
         hex_cepci = CEPCI_cur / OMMEN_CEPCI_REF
     else:
         hex_cepci = CEPCI_cur / CEPCI_ref
+    hex_cepci *= analysis_multiplier
 
     if flash_cost_model == "dai":
         flash_cepci = (CEPCI_cur / DAI_CEPCI_REF) * usd_to_eur
@@ -966,10 +1024,21 @@ def build_costs(
         flash_cepci = CEPCI_cur / OMMEN_CEPCI_REF
     else:
         flash_cepci = CEPCI_cur / CEPCI_ref
+    flash_cepci *= analysis_multiplier
 
     PEC = {}
+    diagnostics = []
 
     comps = getattr(hp, "comps", {}) or {}
+    compressor_eta_vol = max(float(compressor_eta_vol), 1e-6)
+    compressor_eta_vol_lt = max(
+        float(compressor_eta_vol if compressor_eta_vol_lt is None else compressor_eta_vol_lt),
+        1e-6,
+    )
+    compressor_eta_vol_ht = max(
+        float(compressor_eta_vol if compressor_eta_vol_ht is None else compressor_eta_vol_ht),
+        1e-6,
+    )
 
     # --- compressors ----------------------------------------------------------
     for _, comp in comps.items():
@@ -977,16 +1046,32 @@ def build_costs(
         L = lbl.lower()
         if "compressor" not in L or "motor" in L:
             continue
+        volumetric_flow_source = "fallback"
         try:
             m = float(comp.inl[0].m.val_SI)
-            rho = float(comp.inl[0].rho.val_SI)
-            VM_m3_h = (m / max(rho, 1e-9)) * 3600.0
+            vol = _safe_float(comp.inl[0].vol.val_SI)
+            if vol is not None and np.isfinite(vol) and vol > 0.0:
+                VM_m3_h = m * vol * 3600.0
+                volumetric_flow_source = "vol"
+            else:
+                rho = _safe_float(comp.inl[0].rho.val_SI)
+                if rho is None or not np.isfinite(rho) or rho <= 0.0:
+                    raise ValueError("No valid suction density or specific volume.")
+                VM_m3_h = (m / rho) * 3600.0
+                volumetric_flow_source = "rho"
         except Exception:
             VM_m3_h = 279.8  # safe default
         try:
             Wcomp_kW = abs(float(comp.P.val)) / 1e3
         except Exception:
             Wcomp_kW = 1.0
+        eta_vol_used = compressor_eta_vol
+        sizing_flow = np.nan
+        if cost_method == "repo_hthp":
+            if "low temperature compressor" in L:
+                eta_vol_used = compressor_eta_vol_lt
+            elif "high temperature compressor" in L:
+                eta_vol_used = compressor_eta_vol_ht
         if compressor_cost_model == "shamoushaki_centrifugal":
             cost = (
                 math.log10(max(Wcomp_kW, 1e-9))
@@ -1002,13 +1087,37 @@ def build_costs(
                 + 181000.0
             ) * compressor_cepci
         else:
-            cost = 19850.0 * (VM_m3_h / 279.8) ** 0.73 * compressor_cepci
+            sizing_flow = VM_m3_h
+            if cost_method == "repo_hthp":
+                sizing_flow = VM_m3_h / eta_vol_used
+            cost = 19850.0 * (sizing_flow / 279.8) ** 0.73 * compressor_cepci
         PEC[lbl] = max(cost, 0.0)
+        diagnostics.append({
+            "Component": lbl,
+            "Category": "compressor",
+            "Cost method": cost_method,
+            "PEC model": compressor_cost_model,
+            "Q_W": np.nan,
+            "U_W_m2K": np.nan,
+            "LMTD_K": np.nan,
+            "Area_q_lmtd_m2": np.nan,
+            "Area_tespy_ka_m2": np.nan,
+            "Area_used_m2": np.nan,
+            "V_suction_m3_h": VM_m3_h,
+            "V_source": volumetric_flow_source,
+            "eta_vol_used": eta_vol_used,
+            "V_costing_m3_h": sizing_flow if np.isfinite(sizing_flow) else VM_m3_h,
+            "W_kW": Wcomp_kW,
+            "PEC_EUR": PEC[lbl],
+        })
 
     # --- pumps (attach cost to the pump) -------------------------------------
     for _, comp in comps.items():
         lbl = str(getattr(comp, "label", "") or "")
         if "pump" not in lbl.lower():
+            continue
+        if cost_method == "repo_hthp" and not include_pumps_in_pec:
+            PEC.setdefault(lbl, 0.0)
             continue
         try:
             Wp_kW = abs(float(comp.P.val)) / 1e3
@@ -1029,39 +1138,83 @@ def build_costs(
     def _cost_hex(comp, default_LMTD=12.0):
         Q = _getQ_W(comp)
         if Q <= 1.0:
-            return None
+            return None, None
         k = _k_for(
             getattr(comp, "label", ""),
-            k_evap=k_evap, k_cond=k_cond, k_inter=k_inter, k_trans=k_trans, k_econ=k_econ, k_misc=k_misc
+            k_evap=k_evap, k_cond=k_cond, k_inter=k_inter, k_ihx=k_ihx,
+            k_trans=k_trans, k_econ=k_econ, k_misc=k_misc
         )
-        L = _lmtd_from_comp(comp, default_LMTD)
-        if L <= 1e-6 or k <= 1.0:
-            return None
-        A = Q / (k * L)
+        A = None
+        area_q_lmtd = None
+        area_tespy_ka = None
+        lmtd = np.nan
+        if cost_method == "repo_hthp" and hx_area_method == "tespy_ka":
+            try:
+                kA = abs(float(comp.kA.val))
+                if np.isfinite(kA) and kA > 1.0 and k > 1.0:
+                    area_tespy_ka = kA / k
+                    A = area_tespy_ka
+            except Exception:
+                A = None
+        if A is None:
+            L = _lmtd_from_comp(comp, default_LMTD)
+            lmtd = L
+            if L <= 1e-6 or k <= 1.0:
+                return None, None
+            area_q_lmtd = Q / (k * L)
+            A = area_q_lmtd
+        else:
+            lmtd = _lmtd_from_comp(comp, default_LMTD)
+            if lmtd > 1e-6 and k > 1.0:
+                area_q_lmtd = Q / (k * lmtd)
+        if k <= 1.0:
+            return None, None
         A = max(A, 1e-3)
         if hex_cost_model == "dai_cascade":
-            return 383.5 * A ** 0.65 * hex_cepci
-        if hex_cost_model == "shamoushaki_shell":
-            return max(
+            cost = 383.5 * A ** 0.65 * hex_cepci
+        elif hex_cost_model == "shamoushaki_shell":
+            cost = max(
                 math.log10(A) - 0.06395 * A ** 2 + 947.2 * A + 227.9,
                 0.0
             ) * hex_cepci
-        if hex_cost_model == "shamoushaki_plate":
-            return max(
+        elif hex_cost_model == "shamoushaki_plate":
+            cost = max(
                 math.log10(A) + 0.2581 * A ** 2 + 891.7 * A + 26050.0,
                 0.0
             ) * hex_cepci
-        return 15526.0 * (A / 42.0) ** 0.8 * hex_cepci
+        else:
+            cost = 15526.0 * (A / 42.0) ** 0.8 * hex_cepci
+        diag = {
+            "Component": str(getattr(comp, "label", "") or ""),
+            "Category": "heat_exchanger",
+            "Cost method": cost_method,
+            "PEC model": hex_cost_model,
+            "Q_W": Q,
+            "U_W_m2K": k,
+            "LMTD_K": lmtd,
+            "Area_q_lmtd_m2": area_q_lmtd,
+            "Area_tespy_ka_m2": area_tespy_ka,
+            "Area_used_m2": A,
+            "V_suction_m3_h": np.nan,
+            "eta_vol_used": np.nan,
+            "V_costing_m3_h": np.nan,
+            "W_kW": np.nan,
+            "PEC_EUR": cost,
+        }
+        return cost, diag
 
     HEX_TOKENS = ("condenser", "heatexchanger", "simpleheatexchanger", "dropletseparator",
-                  "economizer", "transcritical", "evap", "consumer", "intermediate")
+                  "economizer", "transcritical", "evap", "consumer", "intermediate",
+                  "internal heat exchanger")
     for _, comp in comps.items():
         lbl = str(getattr(comp, "label", "") or "")
         if any(tok in lbl.lower() for tok in HEX_TOKENS):
             try:
-                cost = _cost_hex(comp, default_LMTD=12.0)
+                cost, diag = _cost_hex(comp, default_LMTD=12.0)
                 if cost:
                     PEC[lbl] = max(PEC.get(lbl, 0.0), cost)
+                if diag is not None:
+                    diagnostics.append(diag)
             except Exception:
                 pass
 
@@ -1149,13 +1302,54 @@ def build_costs(
             PEC.setdefault(lbl, 0.0)
 
     # --- CAPEX→OPEX -----------------------------------------------------------
+    if cost_method == "repo_hthp":
+        # Keep PEC as the equipment-cost result of the selected correlation
+        # and build the installed capital basis separately via F_install.
+        TCI = {k: v * float(install_factor) for k, v in PEC.items()}
+
+        comp_labels = list(TCI.keys())
+        pec_list = list(TCI.values())
+        omc_relative = [float(omc_rel)] * len(pec_list)
+        econ = EconomicAnalysis({
+            "tau": max(1.0, float(tau_h_per_year)),
+            "i_eff": float(i_eff),
+            "n": max(1, int(n)),
+            "r_n": float(r_n_om),
+            "f_tci": 1.0,
+        })
+        if pec_list:
+            Z_CC_list, Z_OM_begin, _ = econ.compute_component_costs(
+                pec_list, omc_relative
+            )
+            Z_OM_list = [z / (1.0 + float(i_eff)) for z in Z_OM_begin]
+            Z = {
+                label: float(zcc + zom)
+                for label, zcc, zom in zip(comp_labels, Z_CC_list, Z_OM_list)
+            }
+        else:
+            Z = {}
+        if return_diagnostics:
+            return PEC, TCI, Z, diagnostics
+        return PEC, TCI, Z
+
     TCI = {k: v * tci_factor for k, v in PEC.items()}
     # capital recovery factor (CRF) with escalation r_n
-    if i_eff > r_n:
-        a = (i_eff - r_n) / (1.0 - ((1.0 + r_n) / (1.0 + i_eff)) ** n)
+    n = max(1, int(n))
+    eps = 1e-12
+    if abs(i_eff - r_n) < eps:
+        # Limit case of both the escalated and the standard CRF for identical
+        # rates, including the common user input i_eff = r_n = 0.
+        a = 1.0 / n
+    elif i_eff > r_n:
+        denom = 1.0 - ((1.0 + r_n) / (1.0 + i_eff)) ** n
+        a = (i_eff - r_n) / denom if abs(denom) > eps else 1.0 / n
     else:
-        # fallback to standard CRF to avoid division by zero/negative rates
-        a = (i_eff * (1.0 + i_eff) ** n) / (((1.0 + i_eff) ** n) - 1.0)
+        # fallback to standard CRF to avoid negative real rates
+        denom = ((1.0 + i_eff) ** n) - 1.0
+        if abs(i_eff) < eps or abs(denom) < eps:
+            a = 1.0 / n
+        else:
+            a = (i_eff * (1.0 + i_eff) ** n) / denom
     hours = max(1.0, float(tau_h_per_year))
     # Theoretical allocation: distribute global CCL/OMCL by PEC share
     sum_PEC = sum(PEC.values())
@@ -1171,6 +1365,8 @@ def build_costs(
         # Fallback (no PEC): keep per-component formula to avoid division by zero
         Z = {k: (TCI[k] * a + omc_rel * TCI[k]) / hours for k in TCI}
 
+    if return_diagnostics:
+        return PEC, TCI, Z, diagnostics
     return PEC, TCI, Z
 
 # ---------- ExerPy integration (clean public API) ----------------------------
@@ -1209,7 +1405,11 @@ def build_Exe_Eco_Costs(
     elec_price_cent_kWh,
     b1_cost_eur_per_GJ=0.0,
     Z_by_component_label,
-    set_product_and_loss_to_zero=True
+    set_product_and_loss_to_zero=True,
+    cost_method="standard",
+    r_n_el=0.02,
+    i_eff=0.08,
+    n=20,
 ):
     """
     Create the ExerPy user cost dict Exe_Eco_Costs.
@@ -1233,6 +1433,8 @@ def build_Exe_Eco_Costs(
 
     # Convert price
     elec_price_eur_per_GJ = eur_per_GJ_from_cent_per_kWh(float(elec_price_cent_kWh))
+    if cost_method == "repo_hthp":
+        elec_price_eur_per_GJ *= _repo_celf(float(r_n_el), float(i_eff), int(n))
 
     # ---- component Z ----
     # Z_by_component_label is keyed by TESPy component label
@@ -1383,11 +1585,15 @@ def run_exergoeconomic_from_hp(
     """
     #_ensure_equations_attr_for_exerpy(hp)
     econ_params = econ_params or {}
+    cost_method = str(costcalcparams.get("cost_method", "standard"))
     i_eff = float(econ_params.get("i_eff", 0.08))
     r_n  = float(econ_params.get("r_n", 0.02))
+    r_n_om = float(econ_params.get("r_n_om", r_n))
+    r_n_el = float(econ_params.get("r_n_el", r_n))
     n    = int(econ_params.get("n", 20))
     omc_rel = float(econ_params.get("omc_rel", 0.03))
     tci_factor = float(econ_params.get("tci_factor", 6.32))
+    install_factor = float(econ_params.get("install_factor", 4.16))
 
     # --- build exergy analysis (virgin) ---
     # Condenser workaround re-enabled (Condenser treated as HeatExchanger in ExerPy).
@@ -1523,11 +1729,17 @@ def run_exergoeconomic_from_hp(
     # --- costs Z from your existing function ---
     _, _, Z = build_costs(
         ean, hp,
+        cost_method=cost_method,
         CEPCI_cur=float(CEPCI_cur),
         CEPCI_ref=float(CEPCI_ref),
+        hx_area_method=str(costcalcparams.get("hx_area_method", "q_lmtd")),
+        compressor_eta_vol=float(costcalcparams.get("compressor_eta_vol", 1.0)),
+        compressor_eta_vol_lt=float(costcalcparams.get("compressor_eta_vol_lt", costcalcparams.get("compressor_eta_vol", 1.0))),
+        compressor_eta_vol_ht=float(costcalcparams.get("compressor_eta_vol_ht", costcalcparams.get("compressor_eta_vol", 1.0))),
         k_evap=float(costcalcparams.get("k_evap", 1500.0)),
         k_cond=float(costcalcparams.get("k_cond", 3500.0)),
         k_inter=float(costcalcparams.get("k_inter", 2200.0)) if "k_inter" in costcalcparams else 2200.0,
+        k_ihx=float(costcalcparams.get("k_ihx", 1500.0)) if "k_ihx" in costcalcparams else 1500.0,
         k_trans=float(costcalcparams.get("k_trans", 60.0)) if "k_trans" in costcalcparams else 60.0,
         k_econ=float(costcalcparams.get("k_econ", 1500.0)) if "k_econ" in costcalcparams else 1500.0,
         k_misc=float(costcalcparams.get("k_misc", 50.0)),
@@ -1536,10 +1748,15 @@ def run_exergoeconomic_from_hp(
         compressor_cost_model=str(costcalcparams.get("compressor_cost_model", "ommen")),
         flash_cost_model=str(costcalcparams.get("flash_cost_model", "ommen")),
         flash_residence_time_s=float(costcalcparams.get("residence_time", 10.0)),
+        cost_index_year=int(costcalcparams.get("current_year", 2025)),
+        analysis_year=int(costcalcparams.get("analysis_year", costcalcparams.get("current_year", 2025))),
+        install_factor=install_factor,
+        include_pumps_in_pec=bool(costcalcparams.get("include_pumps_in_pec", True)),
         tci_factor=tci_factor,
         omc_rel=omc_rel,
         i_eff=i_eff,
         r_n=r_n,
+        r_n_om=r_n_om,
         n=n,
         tau_h_per_year=float(tau_h_per_year)
     )
@@ -1581,7 +1798,11 @@ def run_exergoeconomic_from_hp(
         elec_price_cent_kWh=float(elec_price_cent_kWh),
         b1_cost_eur_per_GJ=float(costcalcparams.get("b1_cost_eur_per_GJ", 0.0)),
         Z_by_component_label=Z,
-        set_product_and_loss_to_zero=True
+        set_product_and_loss_to_zero=True,
+        cost_method=cost_method,
+        r_n_el=r_n_el,
+        i_eff=i_eff,
+        n=n,
     )
 
 
@@ -1621,6 +1842,7 @@ def run_exergoeconomic_from_hp(
                 print(f"  {k:25s} = {Exe_Eco_Costs[k]}")
 
     exa = ExergoeconomicAnalysis(ean)
+    used_allow_singular = False
 
     try:
         if debug:
@@ -1642,12 +1864,35 @@ def run_exergoeconomic_from_hp(
             debug_dump_cost_matrix_equations(exa)
             # Solve (construct_matrix will be called again internally).
             try:
-                exa.solve_exergoeconomic_analysis(Tamb=ean.Tamb)
+                exa.solve_exergoeconomic_analysis(allow_singular=False)
             except TypeError:
-                # Newer ExerPy signature takes no kwargs.
+                # Compatibility with versions not exposing allow_singular.
                 exa.solve_exergoeconomic_analysis()
+            except ValueError as err:
+                if not _is_singular_exergoeconomic_error(err):
+                    raise
+                print(
+                    "[DEBUG] Exergoeconomic system singular -> "
+                    "retry with allow_singular=True"
+                )
+                exa.solve_exergoeconomic_analysis(allow_singular=True)
+                used_allow_singular = True
         else:
-            exa.run(Exe_Eco_Costs=Exe_Eco_Costs, Tamb=ean.Tamb)
+            try:
+                exa.run(Exe_Eco_Costs=Exe_Eco_Costs, allow_singular=False)
+            except TypeError:
+                try:
+                    exa.run(Exe_Eco_Costs=Exe_Eco_Costs)
+                except TypeError:
+                    exa.run(Exe_Eco_Costs)
+            except ValueError as err:
+                if not _is_singular_exergoeconomic_error(err):
+                    raise
+                try:
+                    exa.run(Exe_Eco_Costs=Exe_Eco_Costs, allow_singular=True)
+                except TypeError:
+                    exa.run(Exe_Eco_Costs)
+                used_allow_singular = True
 
     # (keep the result-collection code here)
 
@@ -1726,5 +1971,6 @@ def run_exergoeconomic_from_hp(
         print(traceback.format_exc())
         raise
 
+    setattr(ean, "used_allow_singular_exergoeconomics", used_allow_singular)
 
     return df_execo_comp, df_mat1_ex, df_mat2_ex, df_non_mat_ex, df_eval_ex, ean, Exe_Eco_Costs

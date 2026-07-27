@@ -3,7 +3,19 @@
         "name": "two stage cascade",
         "type": "HeatPumpCascade",
         "refrig1": "R717",
-        "refrig2": "R245fa"
+        "refrig2": "R245fa",
+        "source_mode": "fixed_delta_T",
+        "sink_mode": "sensible",
+        "cascade_split_mode": "t_mid",
+        "lift_share": 0.5,
+        "source_delta_T": 5.0,
+        "m_source": 15.0,
+        "T_steam": 110.0,
+        "m_steam": 0.5,
+        "use_source_pump": true,
+        "use_sink_pump": true,
+        "motor_eta": 0.98,
+        "skip_ommen_check": false
     },
     "ambient": {
         "p": 1,

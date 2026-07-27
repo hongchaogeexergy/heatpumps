@@ -39,6 +39,7 @@ __model_names = {
     'HeatPumpFlash': 'flash',
     'HeatPumpFlashTrans': 'flash_trans',
     'HeatPumpCascade': 'cascade',
+    'HeatPumpCascadeMBHX': 'cascade_mbhx',
     'HeatPumpCascadeTrans': 'cascade_trans',
     'HeatPumpCascade2IHX': 'cascade_2ihx',
     'HeatPumpCascade2IHXTrans': 'cascade_2ihx_trans',

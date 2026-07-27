@@ -22,6 +22,7 @@ def run_full_economic_pipeline(hp, econ: EconParams):
     PEC, TCI, Z = build_costs(
         ean=hp.ean,
         hp=hp,
+        cost_method=econ.cost_method,
         k_evap=econ.k_evap,
         k_cond=econ.k_cond,
         k_inter=econ.k_inter,
@@ -35,12 +36,17 @@ def run_full_economic_pipeline(hp, econ: EconParams):
         flash_pressure_ref_bar=econ.flash_pressure_ref_bar,
         flash_pressure_exponent=econ.flash_pressure_exponent,
         flash_rho_default=econ.flash_rho_default,
+        cost_index_year=int(econ.current_year),
+        analysis_year=econ.analysis_year,
+        install_factor=econ.install_factor,
+        include_pumps_in_pec=econ.include_pumps_in_pec,
         CEPCI_cur=econ.cepci_cur,
         CEPCI_ref=econ.cepci_ref,
         tci_factor=econ.pec_to_tci_factor,
         omc_rel=econ.omc_relative,
         i_eff=econ.i_eff,
         r_n=econ.r_n,
+        r_n_om=econ.r_n_om,
         n=econ.n_years,
         tau_h_per_year=econ.tau_h_per_year,
     )
@@ -67,6 +73,10 @@ def run_full_economic_pipeline(hp, econ: EconParams):
         elec_price_cent_kWh=float(econ.electricity_price_cent_per_kWh),
         Z_by_component_label=Z,
         set_product_and_loss_to_zero=True,
+        cost_method=econ.cost_method,
+        r_n_el=econ.r_n_el,
+        i_eff=econ.i_eff,
+        n=econ.n_years,
     )
 
     # Apply user overrides if provided

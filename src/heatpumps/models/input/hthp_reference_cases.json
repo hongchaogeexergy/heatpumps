@@ -1,0 +1,690 @@
+{
+    "hthp_r290_r600_ls40_tsrc40_tsteam110": {
+        "label": "HTHP-Referenzfall R290/R600 (LS 0.4, Tsrc 40 °C, Dampf 110 °C)",
+        "sources": {
+            "economics_base_url": "https://github.com/sertomas/hthp/blob/main/results/case_steam_110/data/economics_base.csv",
+            "enriched_url": "https://github.com/sertomas/hthp/blob/main/results/case_steam_110/case_steam_110_enriched.csv",
+            "connections_url": "https://github.com/sertomas/hthp/blob/main/results/case_steam_110/designs/R290_R600/LS40_Tsrc40/connections.csv"
+        },
+        "inputs": {
+            "fluid_cycle1": "R290",
+            "fluid_cycle2": "R600",
+            "lift_share": 0.4,
+            "T_source_in_C": 40.0,
+            "m_source_kg_s": 15.0,
+            "T_steam_C": 110.0,
+            "m_steam_kg_s": 0.5,
+            "p_source_bar": 3.0,
+            "source_delta_T_K": 10.0,
+            "T34_C": 68.0
+        },
+        "metrics": [
+            {
+                "key": "COP",
+                "label": "COP",
+                "reference": 2.321,
+                "unit": "-",
+                "digits": 3
+            },
+            {
+                "key": "eta_Lorenz",
+                "label": "η_Lorenz",
+                "reference": 0.456,
+                "unit": "-",
+                "digits": 3
+            },
+            {
+                "key": "epsilon",
+                "label": "ε",
+                "reference": 0.5,
+                "unit": "-",
+                "digits": 3
+            },
+            {
+                "key": "Q_H_kW",
+                "label": "Q̇_H",
+                "reference": 1114.82,
+                "unit": "kW",
+                "digits": 2
+            },
+            {
+                "key": "W_el_kW",
+                "label": "P_el",
+                "reference": 480.27,
+                "unit": "kW",
+                "digits": 2
+            },
+            {
+                "key": "T_source_out_C",
+                "label": "T_source,out",
+                "reference": 29.49,
+                "unit": "°C",
+                "digits": 2
+            },
+            {
+                "key": "m_cycle1_kg_s",
+                "label": "ṁ_LT",
+                "reference": 3.30398,
+                "unit": "kg/s",
+                "digits": 3
+            },
+            {
+                "key": "m_cycle2_kg_s",
+                "label": "ṁ_HT",
+                "reference": 4.87364,
+                "unit": "kg/s",
+                "digits": 3
+            },
+            {
+                "key": "V_dot_c1_m3_h",
+                "label": "V̇_comp,LT",
+                "reference": 602.7,
+                "unit": "m³/h",
+                "digits": 1
+            },
+            {
+                "key": "V_dot_c2_m3_h",
+                "label": "V̇_comp,HT",
+                "reference": 946.5,
+                "unit": "m³/h",
+                "digits": 1
+            },
+            {
+                "key": "p_low_c1_bar",
+                "label": "p_low,c1",
+                "reference": 9.4,
+                "unit": "bar",
+                "digits": 2
+            },
+            {
+                "key": "p_high_c1_bar",
+                "label": "p_high,c1",
+                "reference": 30.16,
+                "unit": "bar",
+                "digits": 2
+            },
+            {
+                "key": "T_disch_c1_C",
+                "label": "T_disch,c1",
+                "reference": 92.3,
+                "unit": "°C",
+                "digits": 1
+            },
+            {
+                "key": "p_low_c2_bar",
+                "label": "p_low,c2",
+                "reference": 7.72,
+                "unit": "bar",
+                "digits": 2
+            },
+            {
+                "key": "p_high_c2_bar",
+                "label": "p_high,c2",
+                "reference": 20.23,
+                "unit": "bar",
+                "digits": 2
+            },
+            {
+                "key": "T_disch_c2_C",
+                "label": "T_disch,c2",
+                "reference": 115.9,
+                "unit": "°C",
+                "digits": 1
+            }
+        ],
+        "published_only_metrics": [
+            {
+                "label": "c_P",
+                "reference": 115.657,
+                "unit": "EUR/GJ",
+                "digits": 3
+            },
+            {
+                "label": "Z_sum",
+                "reference": 21.676,
+                "unit": "EUR/h",
+                "digits": 3
+            },
+            {
+                "label": "PEC_total",
+                "reference": 1071.1,
+                "unit": "kEUR",
+                "digits": 1
+            },
+            {
+                "label": "E_F",
+                "reference": 524.18,
+                "unit": "kW",
+                "digits": 2
+            },
+            {
+                "label": "E_P",
+                "reference": 261.87,
+                "unit": "kW",
+                "digits": 2
+            },
+            {
+                "label": "E_D",
+                "reference": 249.89,
+                "unit": "kW",
+                "digits": 2
+            }
+        ]
+    },
+    "hthp_r717_r600_ls40_tsrc40_tsteam110": {
+        "label": "HTHP-Referenzfall R717/R600 (LS 0.4, Tsrc 40 °C, Dampf 110 °C)",
+        "sources": {
+            "economics_base_url": "https://github.com/sertomas/hthp/blob/main/results/case_steam_110/data/economics_base.csv",
+            "enriched_url": "https://github.com/sertomas/hthp/blob/main/results/case_steam_110/case_steam_110_enriched.csv",
+            "connections_url": "https://github.com/sertomas/hthp/blob/main/results/case_steam_110/designs/R717_R600/LS40_Tsrc40/connections.csv"
+        },
+        "inputs": {
+            "fluid_cycle1": "R717",
+            "fluid_cycle2": "R600",
+            "lift_share": 0.4,
+            "T_source_in_C": 40.0,
+            "m_source_kg_s": 15.0,
+            "T_steam_C": 110.0,
+            "m_steam_kg_s": 0.5,
+            "p_source_bar": 3.0,
+            "source_delta_T_K": 10.0,
+            "T34_C": 68.0
+        },
+        "metrics": [
+            {
+                "key": "COP",
+                "label": "COP",
+                "reference": 2.47,
+                "unit": "-",
+                "digits": 3
+            },
+            {
+                "key": "eta_Lorenz",
+                "label": "η_Lorenz",
+                "reference": 0.487,
+                "unit": "-",
+                "digits": 3
+            },
+            {
+                "key": "epsilon",
+                "label": "ε",
+                "reference": 0.529,
+                "unit": "-",
+                "digits": 3
+            },
+            {
+                "key": "Q_H_kW",
+                "label": "Q̇_H",
+                "reference": 1114.8,
+                "unit": "kW",
+                "digits": 2
+            },
+            {
+                "key": "W_el_kW",
+                "label": "P_el",
+                "reference": 451.34,
+                "unit": "kW",
+                "digits": 2
+            },
+            {
+                "key": "T_source_out_C",
+                "label": "T_source,out",
+                "reference": 29.06,
+                "unit": "°C",
+                "digits": 2
+            },
+            {
+                "key": "m_cycle1_kg_s",
+                "label": "ṁ_LT",
+                "reference": 0.73212,
+                "unit": "kg/s",
+                "digits": 3
+            },
+            {
+                "key": "m_cycle2_kg_s",
+                "label": "ṁ_HT",
+                "reference": 4.87364,
+                "unit": "kg/s",
+                "digits": 3
+            },
+            {
+                "key": "V_dot_c1_m3_h",
+                "label": "V̇_comp,LT",
+                "reference": 356.9,
+                "unit": "m³/h",
+                "digits": 1
+            },
+            {
+                "key": "V_dot_c2_m3_h",
+                "label": "V̇_comp,HT",
+                "reference": 946.5,
+                "unit": "m³/h",
+                "digits": 1
+            },
+            {
+                "key": "p_low_c1_bar",
+                "label": "p_low,c1",
+                "reference": 9.7383,
+                "unit": "bar",
+                "digits": 2
+            },
+            {
+                "key": "p_high_c1_bar",
+                "label": "p_high,c1",
+                "reference": 39.6435,
+                "unit": "bar",
+                "digits": 2
+            },
+            {
+                "key": "T_disch_c1_C",
+                "label": "T_disch,c1",
+                "reference": 160.5,
+                "unit": "°C",
+                "digits": 1
+            },
+            {
+                "key": "p_low_c2_bar",
+                "label": "p_low,c2",
+                "reference": 7.7249,
+                "unit": "bar",
+                "digits": 2
+            },
+            {
+                "key": "p_high_c2_bar",
+                "label": "p_high,c2",
+                "reference": 20.2302,
+                "unit": "bar",
+                "digits": 2
+            },
+            {
+                "key": "T_disch_c2_C",
+                "label": "T_disch,c2",
+                "reference": 115.94,
+                "unit": "°C",
+                "digits": 1
+            }
+        ],
+        "published_only_metrics": [
+            {
+                "label": "c_P",
+                "reference": 107.87,
+                "unit": "EUR/GJ",
+                "digits": 3
+            },
+            {
+                "label": "Z_sum",
+                "reference": 19.596,
+                "unit": "EUR/h",
+                "digits": 3
+            },
+            {
+                "label": "PEC_total",
+                "reference": 968.3,
+                "unit": "kEUR",
+                "digits": 1
+            },
+            {
+                "label": "E_F",
+                "reference": 495.26,
+                "unit": "kW",
+                "digits": 2
+            },
+            {
+                "label": "E_P",
+                "reference": 261.87,
+                "unit": "kW",
+                "digits": 2
+            },
+            {
+                "label": "E_D",
+                "reference": 221.81,
+                "unit": "kW",
+                "digits": 2
+            }
+        ]
+    },
+    "hthp_r290_r600_ls30_tsrc40_tsteam110": {
+        "label": "HTHP-Referenzfall R290/R600 (LS 0.3, Tsrc 40 °C, Dampf 110 °C)",
+        "sources": {
+            "economics_base_url": "https://github.com/sertomas/hthp/blob/main/results/case_steam_110/data/economics_base.csv",
+            "enriched_url": "https://github.com/sertomas/hthp/blob/main/results/case_steam_110/case_steam_110_enriched.csv",
+            "connections_url": "https://github.com/sertomas/hthp/blob/main/results/case_steam_110/designs/R290_R600/LS30_Tsrc40/connections.csv"
+        },
+        "inputs": {
+            "fluid_cycle1": "R290",
+            "fluid_cycle2": "R600",
+            "lift_share": 0.3,
+            "T_source_in_C": 40.0,
+            "m_source_kg_s": 15.0,
+            "T_steam_C": 110.0,
+            "m_steam_kg_s": 0.5,
+            "p_source_bar": 3.0,
+            "source_delta_T_K": 10.0,
+            "T34_C": 61.0
+        },
+        "metrics": [
+            {
+                "key": "COP",
+                "label": "COP",
+                "reference": 2.337,
+                "unit": "-",
+                "digits": 3
+            },
+            {
+                "key": "eta_Lorenz",
+                "label": "η_Lorenz",
+                "reference": 0.459,
+                "unit": "-",
+                "digits": 3
+            },
+            {
+                "key": "epsilon",
+                "label": "ε",
+                "reference": 0.503,
+                "unit": "-",
+                "digits": 3
+            },
+            {
+                "key": "Q_H_kW",
+                "label": "Q̇_H",
+                "reference": 1114.8,
+                "unit": "kW",
+                "digits": 2
+            },
+            {
+                "key": "W_el_kW",
+                "label": "P_el",
+                "reference": 477.02,
+                "unit": "kW",
+                "digits": 2
+            },
+            {
+                "key": "T_source_out_C",
+                "label": "T_source,out",
+                "reference": 29.44,
+                "unit": "°C",
+                "digits": 2
+            },
+            {
+                "key": "m_cycle1_kg_s",
+                "label": "ṁ_LT",
+                "reference": 2.96503,
+                "unit": "kg/s",
+                "digits": 3
+            },
+            {
+                "key": "m_cycle2_kg_s",
+                "label": "ṁ_HT",
+                "reference": 4.90935,
+                "unit": "kg/s",
+                "digits": 3
+            },
+            {
+                "key": "V_dot_c1_m3_h",
+                "label": "V̇_comp,LT",
+                "reference": 541.6,
+                "unit": "m³/h",
+                "digits": 1
+            },
+            {
+                "key": "V_dot_c2_m3_h",
+                "label": "V̇_comp,HT",
+                "reference": 1126.0,
+                "unit": "m³/h",
+                "digits": 1
+            },
+            {
+                "key": "p_low_c1_bar",
+                "label": "p_low,c1",
+                "reference": 9.3869,
+                "unit": "bar",
+                "digits": 2
+            },
+            {
+                "key": "p_high_c1_bar",
+                "label": "p_high,c1",
+                "reference": 26.3773,
+                "unit": "bar",
+                "digits": 2
+            },
+            {
+                "key": "T_disch_c1_C",
+                "label": "T_disch,c1",
+                "reference": 84.28,
+                "unit": "°C",
+                "digits": 1
+            },
+            {
+                "key": "p_low_c2_bar",
+                "label": "p_low,c2",
+                "reference": 6.5399,
+                "unit": "bar",
+                "digits": 2
+            },
+            {
+                "key": "p_high_c2_bar",
+                "label": "p_high,c2",
+                "reference": 20.2302,
+                "unit": "bar",
+                "digits": 2
+            },
+            {
+                "key": "T_disch_c2_C",
+                "label": "T_disch,c2",
+                "reference": 115.38,
+                "unit": "°C",
+                "digits": 1
+            }
+        ],
+        "published_only_metrics": [
+            {
+                "label": "c_P",
+                "reference": 115.656,
+                "unit": "EUR/GJ",
+                "digits": 3
+            },
+            {
+                "label": "Z_sum",
+                "reference": 22.262,
+                "unit": "EUR/h",
+                "digits": 3
+            },
+            {
+                "label": "PEC_total",
+                "reference": 1100.1,
+                "unit": "kEUR",
+                "digits": 1
+            },
+            {
+                "label": "E_F",
+                "reference": 520.95,
+                "unit": "kW",
+                "digits": 2
+            },
+            {
+                "label": "E_P",
+                "reference": 261.87,
+                "unit": "kW",
+                "digits": 2
+            },
+            {
+                "label": "E_D",
+                "reference": 246.76,
+                "unit": "kW",
+                "digits": 2
+            }
+        ]
+    },
+    "hthp_r290_r600_ls40_tsrc30_tsteam110": {
+        "label": "HTHP-Referenzfall R290/R600 (LS 0.4, Tsrc 30 °C, Dampf 110 °C)",
+        "sources": {
+            "economics_base_url": "https://github.com/sertomas/hthp/blob/main/results/case_steam_110/data/economics_base.csv",
+            "enriched_url": "https://github.com/sertomas/hthp/blob/main/results/case_steam_110/case_steam_110_enriched.csv",
+            "connections_url": "https://github.com/sertomas/hthp/blob/main/results/case_steam_110/designs/R290_R600/LS40_Tsrc30/connections.csv"
+        },
+        "inputs": {
+            "fluid_cycle1": "R290",
+            "fluid_cycle2": "R600",
+            "lift_share": 0.4,
+            "T_source_in_C": 30.0,
+            "m_source_kg_s": 15.0,
+            "T_steam_C": 110.0,
+            "m_steam_kg_s": 0.5,
+            "p_source_bar": 3.0,
+            "source_delta_T_K": 10.0,
+            "T34_C": 62.0
+        },
+        "metrics": [
+            {
+                "key": "COP",
+                "label": "COP",
+                "reference": 2.142,
+                "unit": "-",
+                "digits": 3
+            },
+            {
+                "key": "eta_Lorenz",
+                "label": "η_Lorenz",
+                "reference": 0.475,
+                "unit": "-",
+                "digits": 3
+            },
+            {
+                "key": "epsilon",
+                "label": "ε",
+                "reference": 0.491,
+                "unit": "-",
+                "digits": 3
+            },
+            {
+                "key": "Q_H_kW",
+                "label": "Q̇_H",
+                "reference": 1114.8,
+                "unit": "kW",
+                "digits": 2
+            },
+            {
+                "key": "W_el_kW",
+                "label": "P_el",
+                "reference": 520.45,
+                "unit": "kW",
+                "digits": 2
+            },
+            {
+                "key": "T_source_out_C",
+                "label": "T_source,out",
+                "reference": 20.11,
+                "unit": "°C",
+                "digits": 2
+            },
+            {
+                "key": "m_cycle1_kg_s",
+                "label": "ṁ_LT",
+                "reference": 2.95519,
+                "unit": "kg/s",
+                "digits": 3
+            },
+            {
+                "key": "m_cycle2_kg_s",
+                "label": "ṁ_HT",
+                "reference": 4.90446,
+                "unit": "kg/s",
+                "digits": 3
+            },
+            {
+                "key": "V_dot_c1_m3_h",
+                "label": "V̇_comp,LT",
+                "reference": 690.2,
+                "unit": "m³/h",
+                "digits": 1
+            },
+            {
+                "key": "V_dot_c2_m3_h",
+                "label": "V̇_comp,HT",
+                "reference": 1098.1,
+                "unit": "m³/h",
+                "digits": 1
+            },
+            {
+                "key": "p_low_c1_bar",
+                "label": "p_low,c1",
+                "reference": 7.3365,
+                "unit": "bar",
+                "digits": 2
+            },
+            {
+                "key": "p_high_c1_bar",
+                "label": "p_high,c1",
+                "reference": 26.8946,
+                "unit": "bar",
+                "digits": 2
+            },
+            {
+                "key": "T_disch_c1_C",
+                "label": "T_disch,c1",
+                "reference": 87.32,
+                "unit": "°C",
+                "digits": 1
+            },
+            {
+                "key": "p_low_c2_bar",
+                "label": "p_low,c2",
+                "reference": 6.7003,
+                "unit": "bar",
+                "digits": 2
+            },
+            {
+                "key": "p_high_c2_bar",
+                "label": "p_high,c2",
+                "reference": 20.2302,
+                "unit": "bar",
+                "digits": 2
+            },
+            {
+                "key": "T_disch_c2_C",
+                "label": "T_disch,c2",
+                "reference": 115.46,
+                "unit": "°C",
+                "digits": 1
+            }
+        ],
+        "published_only_metrics": [
+            {
+                "label": "c_P",
+                "reference": 124.672,
+                "unit": "EUR/GJ",
+                "digits": 3
+            },
+            {
+                "label": "Z_sum",
+                "reference": 22.873,
+                "unit": "EUR/h",
+                "digits": 3
+            },
+            {
+                "label": "PEC_total",
+                "reference": 1130.3,
+                "unit": "kEUR",
+                "digits": 1
+            },
+            {
+                "label": "E_F",
+                "reference": 533.86,
+                "unit": "kW",
+                "digits": 2
+            },
+            {
+                "label": "E_P",
+                "reference": 261.87,
+                "unit": "kW",
+                "digits": 2
+            },
+            {
+                "label": "E_D",
+                "reference": 269.01,
+                "unit": "kW",
+                "digits": 2
+            }
+        ]
+    }
+}

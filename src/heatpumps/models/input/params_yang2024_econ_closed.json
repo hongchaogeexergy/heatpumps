@@ -1,0 +1,94 @@
+{
+    "setup": {
+        "name": "Yang et al. 2024 SVIC approximation with closed economizer",
+        "type": "HeatPumpEconClosed",
+        "refrig": "R245fa",
+        "global_ttd_main_hex": 5.0,
+        "dT_sup": 10.0,
+        "dT_sub": 5.0,
+        "rip_factor": 1.0,
+        "dT_sup_inj": 5.0
+    },
+    "ambient": {
+        "p": 1,
+        "T": 25
+    },
+    "fluids": {
+        "wf": "R245fa",
+        "si": "H2O",
+        "so": "H2O"
+    },
+    "logph": {
+        "x_min": 250,
+        "x_max": 2250,
+        "y_min": 1e0,
+        "y_max": 3e2
+    },
+    "cond": {
+        "pr1": 0.98,
+        "pr2": 0.98,
+        "ttd_u": 5
+    },
+    "evap": {
+        "pr1": 0.98,
+        "pr2": 0.98,
+        "ttd_l": 5
+    },
+    "cons": {
+        "pr": 0.98,
+        "Q": -1e6
+    },
+    "econ": {
+        "pr1": 0.98,
+        "pr2": 0.98,
+        "ttd_l": 5
+    },
+    "comp1": {
+        "eta_s": 0.72
+    },
+    "comp2": {
+        "eta_s": 0.72
+    },
+    "hs_pump": {
+        "eta_s": 0.8
+    },
+    "cons_pump": {
+        "eta_s": 0.8
+    },
+    "hsink_pump": {
+        "eta_s": 0.8
+    },
+    "A5": {
+        "x": 1
+    },
+    "B1": {
+        "T": 65,
+        "p": 1.013
+    },
+    "B2": {
+        "T": 60
+    },
+    "C1": {
+        "T": 115,
+        "p": 10
+    },
+    "C2": {
+        "T": 120
+    },
+    "C3": {
+        "T": 120,
+        "p": 10
+    },
+    "offdesign": {
+        "T_hs_ff_start": 65,
+        "T_hs_ff_end": 65,
+        "T_hs_ff_steps": 1,
+        "T_cons_ff_start": 120,
+        "T_cons_ff_end": 120,
+        "T_cons_ff_steps": 1,
+        "partload_min": 1.0,
+        "partload_max": 1.0,
+        "partload_steps": 1,
+        "save_results": true
+    }
+}

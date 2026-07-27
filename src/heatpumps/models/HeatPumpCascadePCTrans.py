@@ -298,7 +298,7 @@ class HeatPumpCascadePCTrans(HeatPumpCascadeBase):
 
         # Connections
         t_sink_hot = self.params.get('C2', {}).get('T', self.params.get('C3', {}).get('T', self.params['C1']['T']))
-        self.T_mid = (self.params['B2']['T'] + t_sink_hot) / 2
+        self.T_mid = self.get_design_t_mid(self.params['B2']['T'], t_sink_hot)
 
         # Starting values
         p_evap1, p_cond1, p_mid1, p_evap2, h_trans_out, p_mid2 = self.get_pressure_levels(

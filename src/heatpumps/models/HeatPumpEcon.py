@@ -185,7 +185,9 @@ class HeatPumpEcon(HeatPumpBase):
 
         # Set motor efficiency attributes
         for motor_label in ['motor_comp1', 'motor_comp2', 'motor_hs', 'motor_cons']:
-            self.comps[motor_label].set_attr(eta=0.98, eta_char=mot)
+            self.comps[motor_label].set_attr(
+                eta=self.get_motor_efficiency(), eta_char=mot
+            )
 
     def init_simulation(self, **kwargs):
         """Perform initial parametrization with starting values."""
@@ -220,11 +222,13 @@ class HeatPumpEcon(HeatPumpBase):
             )
 
         # Main cycle
-        self.conns['A5'].set_attr(x=self.params['A5']['x'], p=p_evap)
-        self.conns['A0'].set_attr(p=p_cond, fluid={self.wf: 1})
+        self.set_suction_starting_values(
+            'A5', p_evap, x=self.params['A5']['x']
+        )
+        self.set_liquid_starting_values('A0', p_cond, fluid={self.wf: 1})
         self.conns['A9'].set_attr(p=p_mid)
         if self.econ_type.lower() == 'closed':
-            self.conns['A9'].set_attr(x=1)
+            self.set_injection_starting_values(p_mid)
             self.conns['A2'].set_attr(
                 m=Ref(self.conns['A0'], 0.9, 0)
                 )
@@ -276,9 +280,17 @@ class HeatPumpEcon(HeatPumpBase):
         self.comps['comp1'].set_attr(eta_s=self.params['comp1']['eta_s'])
         self.comps['comp2'].set_attr(eta_s=self.params['comp2']['eta_s'])
         self.comps['evap'].set_attr(ttd_l=self.params['evap']['ttd_l'])
-        self.comps['cond'].set_attr(ttd_u=self.params['cond']['ttd_u'])
+        self.comps['cond'].set_attr(
+            ttd_u=self.params['cond']['ttd_u'],
+            subcooling=self.get_liquid_subcooling() > 0
+        )
         if self.econ_type == 'closed':
             self.comps['econ'].set_attr(ttd_l=self.params['econ']['ttd_l'])
+            self.apply_design_injection_superheat()
+        if self.get_suction_superheat() > 0:
+            self.apply_design_superheat('A5')
+        if self.get_liquid_subcooling() > 0:
+            self.apply_design_subcooling('A0')
 
         self._solve_model(**kwargs)
 

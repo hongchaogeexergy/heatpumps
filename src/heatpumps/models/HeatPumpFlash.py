@@ -148,7 +148,9 @@ class HeatPumpFlash(HeatPumpBase):
 
         # Set motor efficiency attributes
         for motor_label in ['motor_comp1', 'motor_comp2', 'motor_hs', 'motor_cons']:
-            self.comps[motor_label].set_attr(eta=0.98, eta_char=mot)
+            self.comps[motor_label].set_attr(
+                eta=self.get_motor_efficiency(), eta_char=mot
+            )
 
 
     def init_simulation(self, **kwargs):
@@ -180,9 +182,11 @@ class HeatPumpFlash(HeatPumpBase):
             )
 
         # Main cycle
-        self.conns['A5'].set_attr(x=self.params['A5']['x'], p=p_evap)
+        self.set_suction_starting_values(
+            'A5', p_evap, x=self.params['A5']['x']
+        )
         self.conns['A7'].set_attr(p=p_mid)
-        self.conns['A0'].set_attr(p=p_cond, fluid={self.wf: 1})
+        self.set_liquid_starting_values('A0', p_cond, fluid={self.wf: 1})
         # Heat source
         self.conns['B1'].set_attr(
             T=self.params['B1']['T'], p=self.params['B1']['p'],
@@ -228,7 +232,14 @@ class HeatPumpFlash(HeatPumpBase):
         self.comps['comp1'].set_attr(eta_s=self.params['comp1']['eta_s'])
         self.comps['comp2'].set_attr(eta_s=self.params['comp2']['eta_s'])
         self.comps['evap'].set_attr(ttd_l=self.params['evap']['ttd_l'])
-        self.comps['cond'].set_attr(ttd_u=self.params['cond']['ttd_u'])
+        self.comps['cond'].set_attr(
+            ttd_u=self.params['cond']['ttd_u'],
+            subcooling=self.get_liquid_subcooling() > 0
+        )
+        if self.get_suction_superheat() > 0:
+            self.apply_design_superheat('A5')
+        if self.get_liquid_subcooling() > 0:
+            self.apply_design_subcooling('A0')
 
         self._solve_model(**kwargs)
 

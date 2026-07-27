@@ -1,0 +1,141 @@
+{
+    "setup": {
+        "name": "HTHP reference case R290/R600 (LS40, Tsrc40, Tsteam110) MBHX",
+        "type": "HeatPumpCascadeMBHX",
+        "refrig1": "R290",
+        "refrig2": "R600",
+        "reference_id": "hthp_r290_r600_ls40_tsrc40_tsteam110",
+        "source_mode": "fixed_mass_flow",
+        "sink_mode": "steam",
+        "cascade_split_mode": "lift_share",
+        "lift_share": 0.4,
+        "source_delta_T": 10.0,
+        "m_source": 15.0,
+        "T_steam": 110.0,
+        "m_steam": 0.5,
+        "use_source_pump": false,
+        "use_sink_pump": false,
+        "motor_eta": 0.95,
+        "skip_ommen_check": false
+    },
+    "ambient": {
+        "p": 1.013,
+        "T": 20
+    },
+    "fluids": {
+        "wf1": "R290",
+        "wf2": "R600",
+        "si": "H2O",
+        "so": "H2O"
+    },
+    "logph": {
+        "x_min": 250,
+        "x_max": 2250,
+        "y_min": 1e0,
+        "y_max": 3e2
+    },
+    "cond": {
+        "pr1": 1.0,
+        "pr2": 1.0,
+        "ttd_u": 5
+    },
+    "evap": {
+        "pr1": 1.0,
+        "pr2": 1.0,
+        "ttd_l": 5
+    },
+    "inter": {
+        "pr1": 1.0,
+        "pr2": 1.0,
+        "ttd_u": 5
+    },
+    "cons": {
+        "pr": 1.0,
+        "Q": -1114820
+    },
+    "LT_comp": {
+        "eta_s": 0.8
+    },
+    "HT_comp": {
+        "eta_s": 0.8
+    },
+    "hs_pump": {
+        "eta_s": 0.8
+    },
+    "cons_pump": {
+        "eta_s": 0.8
+    },
+    "hsink_pump": {
+        "eta_s": 0.8
+    },
+    "A3": {
+        "x": 1
+    },
+    "D3": {
+        "x": 1
+    },
+    "B1": {
+        "T": 40,
+        "p": 3
+    },
+    "B2": {
+        "T": 30
+    },
+    "C1": {
+        "T": 110,
+        "p": 1.4338
+    },
+    "C2": {
+        "T": 110
+    },
+    "C3": {
+        "T": 110,
+        "p": 1.4338
+    },
+    "offdesign": {
+        "T_hs_ff_start": 40,
+        "T_hs_ff_end": 40,
+        "T_hs_ff_steps": 1,
+        "T_cons_ff_start": 110,
+        "T_cons_ff_end": 110,
+        "T_cons_ff_steps": 1,
+        "partload_min": 0.5,
+        "partload_max": 1.0,
+        "partload_steps": 6,
+        "save_results": true
+    },
+    "costcalcparams": {
+        "cost_method": "repo_hthp",
+        "current_year": "2024",
+        "analysis_year": 2026,
+        "elec_price_cent_kWh": 15.9,
+        "gas_price_cent_kWh": 4.7,
+        "b1_cost_eur_per_GJ": 0.0,
+        "tau_h_per_year": 7500.0,
+        "usd_to_eur": 0.93,
+        "hex_cost_model": "ommen",
+        "compressor_cost_model": "ommen",
+        "flash_cost_model": "ommen",
+        "include_pumps_in_pec": false,
+        "hx_area_method": "tespy_ka",
+        "compressor_eta_vol": 0.85,
+        "compressor_eta_vol_lt": 0.85,
+        "compressor_eta_vol_ht": 0.85,
+        "k_evap": 1500,
+        "k_cond": 3500,
+        "k_inter": 2200,
+        "k_misc": 50,
+        "residence_time": 10
+    },
+    "econ_params": {
+        "i_eff": 0.08,
+        "r_n": 0.02,
+        "r_n_om": 0.02,
+        "r_n_el": 0.02,
+        "n": 20,
+        "omc_rel": 0.03,
+        "tci_factor": 6.32,
+        "install_factor": 4.16,
+        "co2_price_eur_per_t": 60.0
+    }
+}

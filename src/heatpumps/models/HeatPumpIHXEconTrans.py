@@ -336,7 +336,7 @@ class HeatPumpIHXEconTrans(HeatPumpBase):
             'T', t_sink_hot + self.params['trans']['ttd_l'] + 273.15,
             wf
         ) * 1e-3
-        p_mid = np.sqrt(p_evap * self.params['A0']['p'])
+        p_mid = self.get_mid_pressure(p_evap, self.params['A0']['p'])
 
         return p_evap, h_trans_out, p_mid
     def get_plotting_states(self, **kwargs):

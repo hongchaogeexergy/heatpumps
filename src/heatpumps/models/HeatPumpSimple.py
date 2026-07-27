@@ -182,8 +182,10 @@ class HeatPumpSimple(HeatPumpBase):
         )
 
         # Main cycle
-        self.conns['A3'].set_attr(x=self.params['A3']['x'], p=p_evap)
-        self.conns['A0'].set_attr(p=p_cond, fluid={self.wf: 1})
+        self.set_suction_starting_values(
+            'A3', p_evap, x=self.params['A3']['x']
+        )
+        self.set_liquid_starting_values('A0', p_cond, fluid={self.wf: 1})
 
         # Heat source
         self.conns['B1'].set_attr(
@@ -241,7 +243,14 @@ class HeatPumpSimple(HeatPumpBase):
         """Perform final parametrization and design simulation."""
         self.comps['comp'].set_attr(eta_s=self._normalize_eta(self.params['comp']['eta_s']))
         self.comps['evap'].set_attr(ttd_l=self.params['evap']['ttd_l'])
-        self.comps['cond'].set_attr(ttd_u=self.params['cond']['ttd_u'])
+        self.comps['cond'].set_attr(
+            ttd_u=self.params['cond']['ttd_u'],
+            subcooling=self.get_liquid_subcooling() > 0
+        )
+        if self.get_suction_superheat() > 0:
+            self.apply_design_superheat('A3')
+        if self.get_liquid_subcooling() > 0:
+            self.apply_design_subcooling('A0')
 
         self._solve_model(**kwargs)
         print("DEBUG Compressor eta_s (TESPy value):",self.comps['comp'].eta_s.val)

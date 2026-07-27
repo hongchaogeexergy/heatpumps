@@ -1,5 +1,6 @@
 from .HeatPumpBase import HeatPumpBase
 from .HeatPumpCascade import HeatPumpCascade
+from .HeatPumpCascadeMBHX import HeatPumpCascadeMBHX
 from .HeatPumpCascade2IHX import HeatPumpCascade2IHX
 from .HeatPumpCascade2IHXTrans import HeatPumpCascade2IHXTrans
 from .HeatPumpCascadeTrans import HeatPumpCascadeTrans
@@ -45,7 +46,8 @@ from .HeatPumpCascadePCIHXTrans import HeatPumpCascadePCIHXTrans
 from .HeatPumpCascadePCTrans import HeatPumpCascadePCTrans
 
 __all__ = [
-    'HeatPumpBase', 'HeatPumpCascade', 'HeatPumpCascade2IHX',
+    'HeatPumpBase', 'HeatPumpCascade', 'HeatPumpCascadeMBHX',
+    'HeatPumpCascade2IHX',
     'HeatPumpCascade2IHXTrans', 'HeatPumpCascadeTrans', 'HeatPumpEcon',
     'HeatPumpEconIHX', 'HeatPumpEconIHXTrans', 'HeatPumpEconTrans',
     'HeatPumpFlash', 'HeatPumpFlashTrans', 'HeatPumpIC', 'HeatPumpICTrans',

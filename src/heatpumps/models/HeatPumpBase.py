@@ -1,5 +1,6 @@
 import json
 import os
+import logging
 from datetime import datetime
 from time import time
 import tempfile
@@ -58,6 +59,354 @@ class HeatPumpBase:
 
         self._init_dir_paths()
 
+    def _get_setup_float(self, key, default=0.0):
+        """Read a float from setup parameters with a fallback."""
+        return float(self.params.get('setup', {}).get(key, default))
+
+    def _get_setup_value(self, key, default=None):
+        """Read a raw setup value with a fallback."""
+        return self.params.get('setup', {}).get(key, default)
+
+    def get_suction_superheat(self):
+        """Return compressor suction superheat in K."""
+        return max(0.0, self._get_setup_float('dT_sup', 0.0))
+
+    def get_liquid_subcooling(self):
+        """Return condenser outlet subcooling in K."""
+        return max(0.0, self._get_setup_float('dT_sub', 0.0))
+
+    def get_mid_pressure_factor(self):
+        """Return relative intermediate pressure factor (RIP)."""
+        return max(1e-6, self._get_setup_float('rip_factor', 1.0))
+
+    def get_motor_efficiency(self):
+        """Return electrical motor efficiency for auxiliary drives."""
+        return self._normalize_eta(
+            self.params.get('setup', {}).get('motor_eta', 0.98)
+        )
+
+    def get_source_mode(self):
+        """Return the configured source-side boundary mode."""
+        mode = str(self._get_setup_value('source_mode', 'fixed_delta_T'))
+        if mode not in {'fixed_delta_T', 'fixed_mass_flow'}:
+            raise ValueError(
+                f"Unsupported source_mode '{mode}'. "
+                + "Supported values are 'fixed_delta_T' and "
+                + "'fixed_mass_flow'."
+            )
+        return mode
+
+    def get_sink_mode(self):
+        """Return the configured sink-side boundary mode."""
+        mode = str(self._get_setup_value('sink_mode', 'sensible'))
+        if mode not in {'sensible', 'steam'}:
+            raise ValueError(
+                f"Unsupported sink_mode '{mode}'. "
+                + "Supported values are 'sensible' and 'steam'."
+            )
+        return mode
+
+    def get_source_delta_T(self):
+        """Return the configured source-side temperature drop in K."""
+        if 'source_delta_T' in self.params.get('setup', {}):
+            return max(0.0, self._get_setup_float('source_delta_T', 0.0))
+        if (
+            'B1' in self.params
+            and 'B2' in self.params
+            and 'T' in self.params['B1']
+            and 'T' in self.params['B2']
+        ):
+            return max(
+                0.0, float(self.params['B1']['T']) - float(self.params['B2']['T'])
+            )
+        return 0.0
+
+    def get_source_mass_flow(self):
+        """Return the configured source-side mass flow in kg/s."""
+        value = self._get_setup_value(
+            'm_source', self.params.get('B1', {}).get('m')
+        )
+        if value is None:
+            return None
+        return float(value)
+
+    def get_steam_temperature(self):
+        """Return the configured steam saturation temperature in degC."""
+        value = self._get_setup_value(
+            'T_steam',
+            self.params.get('C2', {}).get(
+                'T', self.params.get('C3', {}).get('T', self.params['C1']['T'])
+            )
+        )
+        return float(value)
+
+    def get_steam_mass_flow(self):
+        """Return the configured steam mass flow in kg/s."""
+        value = self._get_setup_value(
+            'm_steam', self.params.get('C1', {}).get('m')
+        )
+        if value is None:
+            return None
+        return float(value)
+
+    def get_use_source_pump(self):
+        """Return whether the source pump is part of the modeled system."""
+        return bool(self._get_setup_value('use_source_pump', True))
+
+    def get_use_sink_pump(self):
+        """Return whether the sink pump is part of the modeled system."""
+        return bool(self._get_setup_value('use_sink_pump', True))
+
+    def get_source_inlet_temperature(self):
+        """Return the source inlet temperature in degC."""
+        return float(self.params['B1']['T'])
+
+    def get_source_cold_design_temperature(self):
+        """Return the source outlet temperature used for design setup."""
+        if self.get_source_mode() == 'fixed_mass_flow':
+            return self.get_source_inlet_temperature() - self.get_source_delta_T()
+        if 'B2' in self.params and 'T' in self.params['B2']:
+            return float(self.params['B2']['T'])
+        return self.get_source_inlet_temperature() - self.get_source_delta_T()
+
+    def get_sink_hot_design_temperature(self):
+        """Return the hot sink target temperature in degC."""
+        if self.get_sink_mode() == 'steam':
+            return self.get_steam_temperature()
+        return float(
+            self.params.get('C2', {}).get(
+                'T', self.params.get('C3', {}).get('T', self.params['C1']['T'])
+            )
+        )
+
+    def get_sink_pressure_bar(self):
+        """Return the sink-side pressure in bar."""
+        if self.get_sink_mode() == 'steam':
+            return PSI(
+                'P', 'Q', 0, 'T', self.get_steam_temperature() + 273.15, self.si
+            ) * 1e-5
+        for label in ('C1', 'C3', 'C2'):
+            value = self.params.get(label, {}).get('p')
+            if value is not None:
+                return float(value)
+        return None
+
+    def get_source_outlet_connection_label(self):
+        """Return the actual source outlet connection label."""
+        if 'B3' in self.conns:
+            return 'B3'
+        if 'B2' in self.conns:
+            return 'B2'
+        return None
+
+    def get_sink_outlet_connection_label(self):
+        """Return the actual sink outlet connection label."""
+        if 'C3' in self.conns:
+            return 'C3'
+        if 'C2' in self.conns:
+            return 'C2'
+        return None
+
+    def _get_conn_temperature_C(self, label, fallback=None):
+        """Return a connection temperature from the solved state or params."""
+        conn = self.conns.get(label)
+        if conn is not None:
+            try:
+                value = float(conn.T.val)
+                if np.isfinite(value):
+                    return value
+            except Exception:
+                pass
+        if label in self.params and 'T' in self.params[label]:
+            return float(self.params[label]['T'])
+        return fallback
+
+    @staticmethod
+    def _get_log_mean_temperature_K(t_in_c, t_out_c):
+        """Return the log-mean absolute temperature in K."""
+        T_in = float(t_in_c) + 273.15
+        T_out = float(t_out_c) + 273.15
+        if not np.isfinite(T_in) or not np.isfinite(T_out):
+            return np.nan
+        if T_in <= 0 or T_out <= 0:
+            return np.nan
+        if np.isclose(T_in, T_out):
+            return T_in
+        return (T_out - T_in) / (np.log(T_out) - np.log(T_in))
+
+    def supports_partload_boundary_modes(self):
+        """Return whether the configured source/sink modes support offdesign."""
+        return (
+            self.get_source_mode() == 'fixed_delta_T'
+            and self.get_sink_mode() == 'sensible'
+            and self.get_use_source_pump()
+            and self.get_use_sink_pump()
+        )
+
+    def get_partload_mode_reason(self):
+        """Return a short explanation why offdesign is unavailable."""
+        if self.supports_partload_boundary_modes():
+            return None
+        return (
+            "Teillast ist aktuell nur fuer sensible Senken mit "
+            + "fixed_delta_T-Quelle und modellierten Quell-/Senkenpumpen "
+            + "verfuegbar."
+        )
+
+    def get_injection_superheat(self):
+        """Return injection superheat in K for closed economizer branches."""
+        return max(0.0, self._get_setup_float('dT_sup_inj', 0.0))
+
+    def get_mid_pressure(self, p_low, p_high):
+        """Return intermediate pressure from geometric mean and RIP."""
+        return np.sqrt(p_low * p_high) * self.get_mid_pressure_factor()
+
+    def get_superheated_vapor_enthalpy(self, pressure_bar, dT_superheat, wf=None):
+        """Return vapor enthalpy at pressure and superheat in kJ/kg."""
+        if wf is None:
+            wf = self.wf
+        t_sat = PSI('T', 'P', pressure_bar * 1e5, 'Q', 1, wf) - 273.15
+        return PSI(
+            'H', 'P', pressure_bar * 1e5, 'T', t_sat + dT_superheat + 273.15, wf
+        ) * 1e-3
+
+    def get_superheated_enthalpy(self, p_evap, wf=None):
+        """Return suction enthalpy for the configured superheat."""
+        if wf is None:
+            wf = self.wf
+        dT_sup = self.get_suction_superheat()
+        if dT_sup <= 0:
+            return None
+        t_sat = PSI('T', 'P', p_evap * 1e5, 'Q', 1, wf) - 273.15
+        return PSI(
+            'H', 'P', p_evap * 1e5, 'T', t_sat + dT_sup + 273.15, wf
+        ) * 1e-3
+
+    def get_subcooled_enthalpy(self, p_cond, wf=None):
+        """Return liquid enthalpy for the configured subcooling."""
+        if wf is None:
+            wf = self.wf
+        dT_sub = self.get_liquid_subcooling()
+        if dT_sub <= 0:
+            return None
+        t_sat = PSI('T', 'P', p_cond * 1e5, 'Q', 0, wf) - 273.15
+        return PSI(
+            'H', 'P', p_cond * 1e5, 'T', t_sat - dT_sub + 273.15, wf
+        ) * 1e-3
+
+    def set_suction_starting_values(self, conn_key, p_evap, x=1, wf=None):
+        """Set a saturated or superheated suction state for initialisation."""
+        attrs = {'p': p_evap}
+        h_superheat = self.get_superheated_enthalpy(p_evap, wf=wf)
+        if h_superheat is not None:
+            attrs['h'] = h_superheat
+        else:
+            attrs['x'] = x
+        self.conns[conn_key].set_attr(**attrs)
+
+    def set_liquid_starting_values(self, conn_key, p_cond, fluid=None, wf=None):
+        """Set a saturated or subcooled liquid state for initialisation."""
+        attrs = {'p': p_cond}
+        if fluid is not None:
+            attrs['fluid'] = fluid
+        h_subcool = self.get_subcooled_enthalpy(p_cond, wf=wf)
+        if h_subcool is not None:
+            attrs['h0'] = h_subcool
+        self.conns[conn_key].set_attr(**attrs)
+
+    def get_injection_superheat_connection_key(self):
+        """Return the connection key of the controlled injection branch."""
+        if getattr(self, 'econ_type', None) != 'closed':
+            return None
+
+        conn_a8 = self.conns.get('A8')
+        conn_a9 = self.conns.get('A9')
+
+        a8_source_label = getattr(getattr(conn_a8, 'source', None), 'label', '').lower()
+        a8_target_label = getattr(getattr(conn_a8, 'target', None), 'label', '').lower()
+        a9_source_label = getattr(getattr(conn_a9, 'source', None), 'label', '').lower()
+        a9_target_label = getattr(getattr(conn_a9, 'target', None), 'label', '').lower()
+        a9_target_type = type(getattr(conn_a9, 'target', None)).__name__.lower()
+
+        # Parallel compression: the economizer side stream is superheated
+        # before entering the parallel compressor on A8.
+        if (
+            conn_a8 is not None
+            and 'economizer' in a8_source_label
+            and 'compressor' in a8_target_label
+        ):
+            return 'A8'
+
+        # Series compression: the economizer vapor is injected directly into
+        # the intermediate merge on A9.
+        if conn_a9 is not None and 'economizer' in a9_source_label and (
+            'merge' in a9_target_label
+            or 'injection' in a9_target_label
+            or 'merge' in a9_target_type
+        ):
+            return 'A9'
+
+        if conn_a8 is not None and 'compressor' in a8_target_label:
+            return 'A8'
+        if conn_a9 is not None and (
+            'merge' in a9_target_label
+            or 'injection' in a9_target_label
+            or 'merge' in a9_target_type
+        ):
+            return 'A9'
+
+        return None
+
+    def set_injection_starting_values(self, p_mid, wf=None):
+        """Set a saturated or superheated injection state for initialisation."""
+        conn_key = self.get_injection_superheat_connection_key()
+        if conn_key is None:
+            return
+
+        dT_sup_inj = self.get_injection_superheat()
+        attrs = {'p': p_mid}
+        if dT_sup_inj > 0:
+            attrs['h'] = self.get_superheated_vapor_enthalpy(
+                p_mid, dT_sup_inj, wf=wf
+            )
+        else:
+            attrs['x'] = 1
+        self.conns[conn_key].set_attr(**attrs)
+
+    def apply_design_superheat(self, conn_key):
+        """Apply the configured suction superheat at design point."""
+        dT_sup = self.get_suction_superheat()
+        self.conns[conn_key].set_attr(
+            T=None,
+            Td_bp=dT_sup if dT_sup > 0 else None,
+            h=None,
+            x=None
+        )
+
+    def apply_design_injection_superheat(self):
+        """Apply the configured injection superheat on the injection branch."""
+        conn_key = self.get_injection_superheat_connection_key()
+        if conn_key is None:
+            return
+
+        dT_sup_inj = self.get_injection_superheat()
+        self.conns[conn_key].set_attr(
+            T=None,
+            Td_bp=dT_sup_inj if dT_sup_inj > 0 else None,
+            h=None,
+            x=None if dT_sup_inj > 0 else 1
+        )
+
+    def apply_design_subcooling(self, conn_key):
+        """Apply the configured condenser outlet subcooling at design point."""
+        dT_sub = self.get_liquid_subcooling()
+        self.conns[conn_key].set_attr(
+            T=None,
+            Td_bp=-dT_sub if dT_sub > 0 else None,
+            h=None,
+            x=None
+        )
+
     @staticmethod
     def _normalize_eta(value: float) -> float:
         if value is None:
@@ -94,10 +443,19 @@ class HeatPumpBase:
 
     def _solve_model(self, **kwargs):
         """Solve the model in design mode."""
+        suppress_tespy_warnings = kwargs.pop('_suppress_tespy_warnings', False)
+        tespy_logger = logging.getLogger('TESPyLogger')
+        previous_tespy_level = tespy_logger.level
+        if suppress_tespy_warnings:
+            tespy_logger.setLevel(logging.ERROR)
         if 'iterinfo' in kwargs:
             self.nw.set_attr(iterinfo=kwargs['iterinfo'])
         self.solved_design = False
-        self.nw.solve('design')
+        try:
+            self.nw.solve('design')
+        finally:
+            if suppress_tespy_warnings:
+                tespy_logger.setLevel(previous_tespy_level)
 
         if 'print_results' in kwargs:
             if kwargs['print_results']:
@@ -159,26 +517,239 @@ class HeatPumpBase:
             self.cop = np.nan
 
         # Lorenz COP
-        T_ln_source = (
-            (self.params['B2']['T'] - self.params['B1']['T']) /
-            (np.log(self.params['B2']['T'] + 273.15) - np.log(self.params['B1']['T'] + 273.15))
+        t_source_hot = self._get_conn_temperature_C(
+            'B1', fallback=self.get_source_inlet_temperature()
         )
-        t_sink_hot = self.params.get('C2', self.params.get('C3'))['T']
-        T_ln_sink = (
-            (t_sink_hot - self.params['C1']['T']) /
-            (np.log(t_sink_hot + 273.15) - np.log(self.params['C1']['T'] + 273.15))
+        t_source_cold = self._get_conn_temperature_C(
+            'B2', fallback=self.get_source_cold_design_temperature()
         )
-        self.cop_lorenz = T_ln_sink / (T_ln_sink - T_ln_source)
-        if self.cop_lorenz != 0:
-            self.eta_lorenz = self.cop / self.cop_lorenz
+        T_ln_source = self._get_log_mean_temperature_K(
+            t_source_hot, t_source_cold
+        )
+
+        t_sink_cold = self._get_conn_temperature_C(
+            'C1', fallback=float(self.params['C1']['T'])
+        )
+        t_sink_hot = self._get_conn_temperature_C(
+            'C2', fallback=self.get_sink_hot_design_temperature()
+        )
+        if self.get_sink_mode() == 'steam':
+            T_ln_sink = float(self.get_steam_temperature()) + 273.15
+        else:
+            T_ln_sink = self._get_log_mean_temperature_K(
+                t_sink_cold, t_sink_hot
+            )
+
+        self.cop_lorenz = np.nan
+        self.eta_lorenz = np.nan
+        if (
+            np.isfinite(T_ln_source)
+            and np.isfinite(T_ln_sink)
+            and not np.isclose(T_ln_sink, T_ln_source)
+        ):
+            self.cop_lorenz = T_ln_sink / (T_ln_sink - T_ln_source)
+            if self.cop_lorenz != 0:
+                self.eta_lorenz = self.cop / self.cop_lorenz
 
         # Carnot COP
         if 'cond' in self.params.keys():
             T_cond = t_sink_hot + self.params['cond']['ttd_u'] + 273.15
-            T_evap = self.params['B2']['T'] - self.params['evap']['ttd_l'] + 273.15
-            self.cop_carnot = T_cond / (T_cond - T_evap)
-            if self.cop_carnot != 0:
-                self.eta_carnot = self.cop / self.cop_carnot
+            T_evap = t_source_cold - self.params['evap']['ttd_l'] + 273.15
+            self.cop_carnot = np.nan
+            self.eta_carnot = np.nan
+            if not np.isclose(T_cond, T_evap):
+                self.cop_carnot = T_cond / (T_cond - T_evap)
+                if self.cop_carnot != 0:
+                    self.eta_carnot = self.cop / self.cop_carnot
+
+    def get_power_cop_metrics(self):
+        """Return COP variants and power split metrics."""
+        metrics = {
+            'Q_out_W': self._get_heat_output_W(),
+            'P_total_el_W': np.nan,
+            'P_comp_el_W': 0.0,
+            'P_comp_mech_W': 0.0,
+            'P_aux_el_W': np.nan,
+            'cop_total': np.nan,
+            'cop_comp_el': np.nan,
+            'cop_comp_mech': np.nan,
+        }
+
+        if 'E0' in self.conns:
+            try:
+                total = abs(float(self.conns['E0'].E.val))
+                if np.isfinite(total):
+                    metrics['P_total_el_W'] = total
+            except Exception:
+                pass
+
+        for key, conn in self.conns.items():
+            if not hasattr(conn, 'E'):
+                continue
+
+            try:
+                power = abs(float(conn.E.val))
+            except Exception:
+                continue
+            if not np.isfinite(power):
+                continue
+
+            target_label = getattr(getattr(conn, 'target', None), 'label', '').lower()
+            if key.startswith('E') and key != 'E0' and 'comp' in target_label:
+                metrics['P_comp_el_W'] += power
+            elif key.startswith('e') and 'comp' in target_label:
+                metrics['P_comp_mech_W'] += power
+
+        if np.isfinite(metrics['P_total_el_W']):
+            metrics['P_aux_el_W'] = (
+                metrics['P_total_el_W'] - metrics['P_comp_el_W']
+            )
+
+        q_out = metrics['Q_out_W']
+        if np.isfinite(q_out) and metrics['P_total_el_W'] > 0:
+            metrics['cop_total'] = abs(q_out / metrics['P_total_el_W'])
+        if np.isfinite(q_out) and metrics['P_comp_el_W'] > 0:
+            metrics['cop_comp_el'] = abs(q_out / metrics['P_comp_el_W'])
+        if np.isfinite(q_out) and metrics['P_comp_mech_W'] > 0:
+            metrics['cop_comp_mech'] = abs(q_out / metrics['P_comp_mech_W'])
+
+        return metrics
+
+    def get_injection_metrics(self):
+        """Return injection-branch KPIs for injection-based topologies."""
+        metrics = {
+            'branch_type': None,
+            'inj_conn_key': None,
+            'm_main_kg_s': np.nan,
+            'm_inj_kg_s': np.nan,
+            'A_inj': np.nan,
+            'dT_sup_inj_K': np.nan,
+            'T_inj_C': np.nan,
+            'p_inj_bar': np.nan,
+        }
+
+        try:
+            m_main = float(self.conns['A5'].m.val)
+            if np.isfinite(m_main):
+                metrics['m_main_kg_s'] = m_main
+        except Exception:
+            return metrics
+
+        if 'flash' in self.params.get('setup', {}).get('type', '').lower():
+            conn_key = 'A7'
+            try:
+                m_total = float(self.conns[conn_key].m.val)
+                m_inj = m_total - metrics['m_main_kg_s']
+                metrics['branch_type'] = 'Flash-Gas'
+            except Exception:
+                return metrics
+        else:
+            conn_key = self.get_injection_superheat_connection_key()
+            if conn_key is None:
+                return metrics
+            try:
+                m_inj = float(self.conns[conn_key].m.val)
+                metrics['branch_type'] = 'Economizer-Injektion'
+            except Exception:
+                return metrics
+
+        metrics['inj_conn_key'] = conn_key
+        if np.isfinite(m_inj):
+            metrics['m_inj_kg_s'] = m_inj
+        if (
+            np.isfinite(metrics['m_inj_kg_s'])
+            and np.isfinite(metrics['m_main_kg_s'])
+            and metrics['m_main_kg_s'] != 0
+        ):
+            metrics['A_inj'] = metrics['m_inj_kg_s'] / metrics['m_main_kg_s']
+
+        conn = self.conns.get(conn_key)
+        if conn is None:
+            return metrics
+
+        try:
+            p_inj = float(conn.p.val)
+            t_inj = float(conn.T.val)
+            if np.isfinite(p_inj):
+                metrics['p_inj_bar'] = p_inj
+            if np.isfinite(t_inj):
+                metrics['T_inj_C'] = t_inj
+            if np.isfinite(p_inj) and np.isfinite(t_inj):
+                t_sat = PSI('T', 'P', p_inj * 1e5, 'Q', 1, self.wf) - 273.15
+                metrics['dT_sup_inj_K'] = t_inj - t_sat
+        except Exception:
+            pass
+
+        return metrics
+
+    def get_literature_comparison_metrics(self):
+        """Return literature-oriented KPIs for injection-based topologies."""
+        injection = self.get_injection_metrics()
+        if not np.isfinite(injection.get('A_inj', np.nan)):
+            return {}
+
+        comp_results = self.get_compressor_results()
+        if not comp_results:
+            return {}
+
+        compressors = []
+        for label, values in comp_results.items():
+            comp = {'label': label}
+            comp.update(values)
+            compressors.append(comp)
+
+        def _finite_or_inf(value):
+            try:
+                value = float(value)
+            except Exception:
+                return np.inf
+            return value if np.isfinite(value) else np.inf
+
+        suction_comp = min(compressors, key=lambda comp: (
+            _finite_or_inf(comp.get('p_in')), comp['label']
+        ))
+        final_comp = max(compressors, key=lambda comp: (
+            _finite_or_inf(comp.get('p_out')), comp['label']
+        ))
+        stage1_comp = min(compressors, key=lambda comp: (
+            _finite_or_inf(comp.get('p_out')), comp['label']
+        ))
+
+        q_out_W = self._get_heat_output_W()
+        metrics = {
+            'branch_type': injection.get('branch_type'),
+            'inj_conn_key': injection.get('inj_conn_key'),
+            'A_inj': injection.get('A_inj', np.nan),
+            'm_main_kg_s': injection.get('m_main_kg_s', np.nan),
+            'm_inj_kg_s': injection.get('m_inj_kg_s', np.nan),
+            'p_inj_bar': injection.get('p_inj_bar', np.nan),
+            'T_inj_C': injection.get('T_inj_C', np.nan),
+            'dT_sup_inj_K': injection.get('dT_sup_inj_K', np.nan),
+            'Q_out_MW': abs(q_out_W) / 1e6 if np.isfinite(q_out_W) else np.nan,
+            'compressor_suction_label': suction_comp.get('label'),
+            'compressor_stage1_label': stage1_comp.get('label'),
+            'compressor_final_label': final_comp.get('label'),
+            'T_suction_C': suction_comp.get('T_in', np.nan),
+            'p_suction_bar': suction_comp.get('p_in', np.nan),
+            'Vdot_suction_m3_h': suction_comp.get('V_dot', np.nan),
+            'T_discharge_stage1_C': stage1_comp.get('T_out', np.nan),
+            'p_discharge_stage1_bar': stage1_comp.get('p_out', np.nan),
+            'PI_stage1': stage1_comp.get('PI', np.nan),
+            'T_discharge_final_C': final_comp.get('T_out', np.nan),
+            'p_discharge_final_bar': final_comp.get('p_out', np.nan),
+            'PI_final': final_comp.get('PI', np.nan),
+        }
+
+        vdot_h = metrics.get('Vdot_suction_m3_h', np.nan)
+        if np.isfinite(vdot_h) and vdot_h > 0 and np.isfinite(q_out_W):
+            vdot_s = vdot_h / 3600.0
+            metrics['VHC_kJ_m3'] = abs(q_out_W) / vdot_s / 1e3
+            metrics['VHC_MJ_m3'] = abs(q_out_W) / vdot_s / 1e6
+        else:
+            metrics['VHC_kJ_m3'] = np.nan
+            metrics['VHC_MJ_m3'] = np.nan
+
+        return metrics
 
     # added economic_analysis & econ_overrides
     def run_model(self, print_cop=False, exergy_analysis=True,
@@ -186,7 +757,7 @@ class HeatPumpBase:
         """Run the initialization and design simulation routine."""
         self.generate_components()
         self.generate_connections()
-        self.init_simulation(**kwargs)
+        self.init_simulation(_suppress_tespy_warnings=True, **kwargs)
         self.design_simulation(**kwargs)
         if not self.solved_design:
             residual = self.nw.residual[-1] if len(self.nw.residual) else np.nan
@@ -281,7 +852,7 @@ class HeatPumpBase:
             'T', T_cond + self.params['cond']['ttd_u'] + 273.15,
             wf
         ) * 1e-5
-        p_mid = np.sqrt(p_evap * p_cond)
+        p_mid = self.get_mid_pressure(p_evap, p_cond)
 
         return p_evap, p_cond, p_mid
 
@@ -1220,49 +1791,52 @@ class HeatPumpBase:
                 + user_help_prompt
             )
 
-        if 'HeatExchanger' in self.nw.results:
-            mask_heatex_pos_Q_dot = self.nw.results['HeatExchanger']['Q'] > 0
+        for hx_group in ('HeatExchanger', 'SectionedHeatExchanger'):
+            if hx_group not in self.nw.results:
+                continue
+
+            mask_heatex_pos_Q_dot = self.nw.results[hx_group]['Q'] > 0
             if any(mask_heatex_pos_Q_dot):
                 heatex_pos_Q_dot = [
                     idx for idx
-                    in self.nw.results['HeatExchanger'].loc[
+                    in self.nw.results[hx_group].loc[
                         mask_heatex_pos_Q_dot, 'Q'
                     ].index
                 ]
                 raise ValueError(
-                    f'Heat flow in HeatExchanger(s) {heatex_pos_Q_dot} is '
+                    f'Heat flow in {hx_group}(s) {heatex_pos_Q_dot} is '
                     + f'positive, indicating flow form cold to hot side. '
                     + user_help_prompt
                 )
 
             mask_heatex_neg_ttd_u = (
-                self.nw.results['HeatExchanger']['ttd_u'] <= 0
+                self.nw.results[hx_group]['ttd_u'] <= 0
             )
             if any(mask_heatex_neg_ttd_u):
                 heatex_neg_ttd_u = [
                     idx for idx
-                    in self.nw.results['HeatExchanger'].loc[
+                    in self.nw.results[hx_group].loc[
                         mask_heatex_neg_ttd_u, 'ttd_u'
                     ].index
                 ]
                 raise ValueError(
-                    'Upper terminal temperature difference in HeatExchanger(s)'
+                    f'Upper terminal temperature difference in {hx_group}(s)'
                     + f' {heatex_neg_ttd_u} is not positive. '
                     + user_help_prompt
                 )
 
             mask_heatex_neg_ttd_l = (
-                self.nw.results['HeatExchanger']['ttd_l'] <= 0
+                self.nw.results[hx_group]['ttd_l'] <= 0
             )
             if any(mask_heatex_neg_ttd_u):
                 heatex_neg_ttd_l = [
                     idx for idx
-                    in self.nw.results['HeatExchanger'].loc[
+                    in self.nw.results[hx_group].loc[
                         mask_heatex_neg_ttd_l, 'ttd_l'
                     ].index
                 ]
                 raise ValueError(
-                    'Lower terminal temperature difference in HeatExchanger(s)'
+                    f'Lower terminal temperature difference in {hx_group}(s)'
                     + f' {heatex_neg_ttd_l} is not positive. '
                     + user_help_prompt
                 )
@@ -1348,6 +1922,8 @@ class HeatPumpBase:
                 'Heat pump has not been designed via the "design_simulation" '
                 + 'method. Therefore the offdesign simulation will fail.'
             )
+        if not self.supports_partload_boundary_modes():
+            raise NotImplementedError(self.get_partload_mode_reason())
 
         # Parametrization
         kA_char1_default = ldc('heat exchanger', 'kA_char1', 'DEFAULT', CharLine)
@@ -1542,7 +2118,12 @@ class HeatPumpBase:
                 comp = c.label
                 results[comp] = {}
 
-                results[comp]['V_dot'] = c.inl[0].vol.val_SI * 3600
+                # TESPy provides the connection volume property on a mass basis.
+                # For literature comparisons we need the suction volumetric flow
+                # rate, i.e. m_dot * v_suction converted to m^3/h.
+                results[comp]['V_dot'] = (
+                    c.inl[0].m.val_SI * c.inl[0].vol.val_SI * 3600
+                )
                 results[comp]['p_in'] = c.inl[0].p.val
                 results[comp]['p_out'] = c.outl[0].p.val
                 results[comp]['PI'] = c.outl[0].p.val / c.inl[0].p.val

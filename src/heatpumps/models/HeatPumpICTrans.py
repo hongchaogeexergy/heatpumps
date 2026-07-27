@@ -197,7 +197,9 @@ class HeatPumpICTrans(HeatPumpBase):
 
 
         # Main cycle
-        self.conns['A3'].set_attr(x=self.params['A3']['x'], p=p_evap)
+        self.set_suction_starting_values(
+            'A3', p_evap, x=self.params['A3']['x']
+        )
         self.conns['A0'].set_attr(
             p=self.params['A0']['p'], h=h_trans_out, fluid={self.wf: 1}
             )
@@ -261,6 +263,8 @@ class HeatPumpICTrans(HeatPumpBase):
         self.comps['comp2'].set_attr(eta_s=self.params['comp2']['eta_s'])
         self.comps['evap'].set_attr(ttd_l=self.params['evap']['ttd_l'])
         self.comps['trans'].set_attr(ttd_l=self.params['trans']['ttd_l'])
+        if self.get_suction_superheat() > 0:
+            self.apply_design_superheat('A3')
 
         T_bp = PSI('T', 'P', self.conns['A4'].p.val_SI, 'Q', 1, self.wf)-273.15
 
@@ -300,7 +304,7 @@ class HeatPumpICTrans(HeatPumpBase):
             'T', t_c2 + self.params['trans']['ttd_l'] + 273.15,
             wf
         ) * 1e-3
-        p_mid = np.sqrt(p_evap * self.params['A0']['p'])
+        p_mid = self.get_mid_pressure(p_evap, self.params['A0']['p'])
 
         return p_evap, h_trans_out, p_mid
 

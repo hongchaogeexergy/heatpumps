@@ -185,7 +185,9 @@ class HeatPumpSimpleTrans(HeatPumpBase):
         self.p_evap = p_evap
 
         # Main cycle
-        self.conns['A3'].set_attr(x=self.params['A3']['x'], p=p_evap)
+        self.set_suction_starting_values(
+            'A3', p_evap, x=self.params['A3']['x']
+        )
         self.conns['A0'].set_attr(
             p=self.params['A0']['p'], h=h_trans_out, fluid={self.wf: 1}
             )
@@ -231,6 +233,8 @@ class HeatPumpSimpleTrans(HeatPumpBase):
         self.comps['comp'].set_attr(eta_s=self.params['comp']['eta_s'])
         self.comps['evap'].set_attr(ttd_l=self.params['evap']['ttd_l'])
         self.comps['trans'].set_attr(ttd_l=self.params['trans']['ttd_l'])
+        if self.get_suction_superheat() > 0:
+            self.apply_design_superheat('A3')
 
         self._solve_model(**kwargs)
 
